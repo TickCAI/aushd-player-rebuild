@@ -7,9 +7,12 @@
 
 #include <memory>
 
+class VideoHost;
+
 class NativeWindow {
  public:
-  NativeWindow(HWND window, flutter::BinaryMessenger* messenger);
+  NativeWindow(HWND window, VideoHost* video_host,
+               flutter::BinaryMessenger* messenger);
 
   ~NativeWindow();
 
@@ -26,6 +29,8 @@ class NativeWindow {
   bool SetHdr(bool enabled);
 
   HWND window_;
+  // Not owned. Used to park the VO while this window rebuilds its frame.
+  VideoHost* video_host_ = nullptr;
   bool fullscreen_ = false;
   LONG_PTR saved_style_ = 0;
   WINDOWPLACEMENT saved_placement_ = {sizeof(WINDOWPLACEMENT)};

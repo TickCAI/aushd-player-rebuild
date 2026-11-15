@@ -27,7 +27,7 @@ bool FlutterWindow::OnCreate() {
       GetHandle(), flutter_controller_->view()->GetNativeWindow(),
       flutter_controller_->engine()->messenger());
   native_window_ = std::make_unique<NativeWindow>(
-      GetHandle(), flutter_controller_->engine()->messenger());
+      GetHandle(), video_host_.get(), flutter_controller_->engine()->messenger());
   trailer_textures_ = std::make_unique<TrailerTextures>(
       flutter_controller_->engine()->messenger(),
       FlutterDesktopRegistrarGetTextureRegistrar(
@@ -73,8 +73,17 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_SIZE:
       if (video_host_) video_host_->OnParentResized();
       break;
+    // The VO is an owned top-level window now, so its position is in screen
+    // coordinates. Follow owner moves and display changes explicitly.
+    case WM_MOVE:
+    case WM_DISPLAYCHANGE:
+      if (video_host_) video_host_->OnParentResized();
+      break;
     case WM_ACTIVATE:
-      if (video_host_ && video_host_->visible()) {
+      // Only steal focus back to the VO when the owner is being activated.
+      // On deactivation, focusing an owned top-level window would re-activate
+      // the app and make Alt+Tab appear to be ignored.
+      if (LOWORD(wparam) != WA_INACTIVE && video_host_ && video_host_->visible()) {
         video_host_->Focus();
         return 0;
       }

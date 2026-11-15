@@ -10,7 +10,13 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"ZERK_VIDEO_HOST";
 constexpr UINT_PTR kCursorTimer = 1;
+constexpr UINT_PTR kSyncTimer = 2;
 constexpr UINT kCursorHideMs = 1500;
+// Let the Flutter view finish its ANGLE swapchain rebuild before the VO
+// swapchain is resized. Two DXGI resizes in one WM_SIZE cascade is what the
+// AMD 32.0.32015.7029 user-mode driver cannot survive.
+constexpr UINT kFullscreenSyncDelayMs = 180;
+constexpr wchar_t kLegacyChildEnv[] = L"AUSHD_VIDEO_CHILD";
 
 const char* SpecialKeyName(WPARAM vk) {
   switch (vk) {
@@ -69,6 +75,11 @@ std::string Utf8(wchar_t c) {
 
 VideoHost::VideoHost(HWND parent, HWND flutter_view, flutter::BinaryMessenger* messenger)
     : parent_(parent), flutter_view_(flutter_view) {
+  // Escape hatch for diagnosis: AUSHD_VIDEO_CHILD=1 restores the pre-1.0.10
+  // WS_CHILD embedding (and skips the fullscreen serialization) so a failed
+  // experiment can be compared side by side without rebuilding.
+  wchar_t flag[8] = {};
+  legacy_child_ = GetEnvironmentVariableW(kLegacyChildEnv, flag, 8) > 0 && flag[0] == L'1';
   channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       messenger, "zerk/video_host", &flutter::StandardMethodCodec::GetInstance());
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
@@ -113,16 +124,74 @@ void VideoHost::EnsureCreated() {
   }
   RECT rc;
   GetClientRect(parent_, &rc);
-  hwnd_ = CreateWindowEx(0, kClassName, L"", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                         0, 0, rc.right - rc.left, rc.bottom - rc.top, parent_, nullptr,
-                         GetModuleHandle(nullptr), this);
+  POINT origin = {rc.left, rc.top};
+  if (!legacy_child_) ClientToScreen(parent_, &origin);
+
+  // Phase B: the VO used to be a WS_CHILD of the Flutter top-level window.
+  // Every fullscreen toggle then changed that window's GWL_STYLE and size,
+  // and the resulting WM_SIZE cascade resized both the ANGLE swapchain and
+  // the mpv swapchain in the same thread, same frame. A standalone mpv in its
+  // own top-level window survived 40 toggles on the same AMD driver, so the
+  // coupling - not the driver API - is what trips amdxx64+0x124815.
+  //
+  // An owned WS_POPUP keeps the VO out of the child window tree while Windows
+  // still guarantees it stays above its owner, follows minimize/restore and
+  // never gets its own taskbar button. Bounds are in screen coordinates and
+  // are re-synced by OnParentResized() whenever the owner moves or resizes.
+  const DWORD style = legacy_child_
+                          ? (WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS)
+                          : (WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+  hwnd_ = CreateWindowEx(0, kClassName, L"", style,
+                         origin.x, origin.y, rc.right - rc.left, rc.bottom - rc.top,
+                         parent_, nullptr, GetModuleHandle(nullptr), this);
   SetWindowLongPtr(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+}
+
+void VideoHost::ApplyBounds(bool redraw) {
+  if (!hwnd_ || pending_bounds_.right <= pending_bounds_.left ||
+      pending_bounds_.bottom <= pending_bounds_.top) {
+    return;
+  }
+  const int width = pending_bounds_.right - pending_bounds_.left;
+  const int height = pending_bounds_.bottom - pending_bounds_.top;
+  const int x = legacy_child_ ? 0 : pending_bounds_.left;
+  const int y = legacy_child_ ? 0 : pending_bounds_.top;
+  MoveWindow(hwnd_, x, y, width, height, redraw ? TRUE : FALSE);
+  if (HWND child = GetWindow(hwnd_, GW_CHILD)) {
+    MoveWindow(child, 0, 0, width, height, redraw ? TRUE : FALSE);
+  }
+}
+
+void VideoHost::BeginFullscreenTransition() {
+  if (legacy_child_ || !hwnd_) return;
+  if (!transitioning_) {
+    restore_visible_ = visible();
+    if (restore_visible_) ShowWindow(hwnd_, SW_HIDE);
+    transitioning_ = true;
+  }
+  // Re-arm on every toggle so a rapid F11 -> F11 pair still waits for the
+  // last parent resize to settle before the VO is sized and shown again.
+  SetTimer(hwnd_, kSyncTimer, kFullscreenSyncDelayMs, nullptr);
+}
+
+void VideoHost::EndFullscreenTransition() {
+  if (!transitioning_) return;
+  KillTimer(hwnd_, kSyncTimer);
+  transitioning_ = false;
+  OnParentResized();
+  if (restore_visible_) {
+    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    Focus();
+  }
+  restore_visible_ = false;
 }
 
 void VideoHost::Show() {
   EnsureCreated();
   OnParentResized();
-  SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
   Focus();
 }
 
@@ -136,10 +205,18 @@ void VideoHost::OnParentResized() {
   if (!hwnd_) return;
   RECT rc;
   GetClientRect(parent_, &rc);
-  MoveWindow(hwnd_, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
-  if (HWND child = GetWindow(hwnd_, GW_CHILD)) {
-    MoveWindow(child, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
-  }
+  POINT origin = {rc.left, rc.top};
+  if (!legacy_child_) ClientToScreen(parent_, &origin);
+  const int width = rc.right - rc.left;
+  const int height = rc.bottom - rc.top;
+  pending_bounds_ = {origin.x, origin.y, origin.x + width, origin.y + height};
+
+  // During a fullscreen toggle the parent's WM_SIZE is still being processed
+  // and ANGLE is rebuilding its swapchain. Do not resize the VO in this same
+  // cascade: just remember the bounds. EndFullscreenTransition() applies them
+  // once the timer fires (or immediately if this call came from Show()).
+  if (transitioning_) return;
+  ApplyBounds(true);
 }
 
 void VideoHost::Focus() {
@@ -255,6 +332,10 @@ LRESULT CALLBACK VideoHost::WndProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
       if (self && self->HandleMouseMessage(message, wparam, lparam)) return 0;
       break;
     case WM_TIMER:
+      if (wparam == kSyncTimer && self) {
+        self->EndFullscreenTransition();
+        return 0;
+      }
       if (wparam == kCursorTimer && self) {
         KillTimer(hwnd, kCursorTimer);
         self->cursor_hidden_ = true;

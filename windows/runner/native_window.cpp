@@ -5,6 +5,8 @@
 #include <optional>
 #include <vector>
 
+#include "video_host.h"
+
 namespace {
 
 constexpr int kGetAdvancedColorInfo = 9;
@@ -77,7 +79,9 @@ void InitHeader(T& info, int type, const Target& target) {
 
 }
 
-NativeWindow::NativeWindow(HWND window, flutter::BinaryMessenger* messenger) : window_(window) {
+NativeWindow::NativeWindow(HWND window, VideoHost* video_host,
+                           flutter::BinaryMessenger* messenger)
+    : window_(window), video_host_(video_host) {
   channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       messenger, "zerk/window", &flutter::StandardMethodCodec::GetInstance());
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
@@ -109,16 +113,15 @@ NativeWindow::~NativeWindow() {
 
 void NativeWindow::SetFullScreen(bool fullscreen) {
   if (fullscreen == fullscreen_) return;
-  // Phase A: do NOT send SWP_FRAMECHANGED. That flag forces Windows to
-  // recompute the whole non-client area (WM_NCCALCSIZE / WM_STYLECHANGED /
-  // WM_NCPAINT) and propagates the churn to child windows — including the
-  // mpv VO (WS_CHILD). On AMD 32.0.32015.7029 the framechanged path during a
-  // fullscreen toggle dove the D3D11 user-mode driver into an execute
-  // violation (amdxx64+0x124815). A standalone mpv in its own top-level
-  // window survived 40 toggles, so the swapchain resize alone is fine; the
-  // extra framechanged churn is what crossed the driver. We still change
-  // GWL_STYLE so the client area fills the monitor, but without framechanged
-  // the non-client recompute is deferred and much gentler on child windows.
+  // Phase A (1.0.9) removed SWP_FRAMECHANGED; the crashes continued, so the
+  // frame recompute was not the trigger. Phase B (1.0.10) moves the VO into
+  // an owned top-level window and parks it while this window changes style
+  // and size. ANGLE rebuilds its D3D11 swapchain here; the mpv swapchain is
+  // resized ~180 ms later by the video host's sync timer, so the two DXGI
+  // resizes no longer land in the same WM_SIZE cascade on the same thread.
+  // GWL_STYLE still has to change so the client area fills the monitor, but
+  // no child window is present to receive the resulting non-client churn.
+  if (video_host_) video_host_->BeginFullscreenTransition();
   if (fullscreen) {
     MONITORINFO mi = {sizeof(mi)};
     if (!GetMonitorInfo(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &mi)) return;
