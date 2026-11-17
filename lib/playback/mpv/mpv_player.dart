@@ -141,6 +141,20 @@ final class MpvState {
   }
 }
 
+/// The surface MpvBackend needs from a player, whether mpv runs in-process
+/// (FFI) or in a separate process (JSON IPC). Dart's structural typing means
+/// both implementations satisfy this without an explicit `implements`.
+abstract interface class MpvController {
+  ValueNotifier<MpvState> get state;
+  Stream<MpvEvent> get events;
+  int get address;
+  void command(List<String> args);
+  void commandAsync(List<String> args);
+  void setProperty(String name, String value);
+  void scriptMessage(String script, List<String> args);
+  void dispose();
+}
+
 sealed class MpvEvent {
   const MpvEvent();
 }
@@ -178,7 +192,7 @@ final class MpvShutdown extends MpvEvent {
   const MpvShutdown();
 }
 
-final class MpvPlayer {
+final class MpvPlayer implements MpvController {
   MpvPlayer._(this._mpv, this._handle);
 
   final LibMpv _mpv;

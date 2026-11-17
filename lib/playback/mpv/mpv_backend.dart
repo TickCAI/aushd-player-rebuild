@@ -22,6 +22,7 @@ import '../player_backend.dart';
 import '../player_settings.dart';
 import '../trickplay.dart';
 import 'libmpv.dart' show MpvEndFileReason;
+import 'mpv_ipc_player.dart';
 import 'mpv_options.dart';
 import 'mpv_player.dart';
 import 'video_host.dart';
@@ -42,7 +43,7 @@ final class MpvBackend implements PlayerBackend {
   final L10n l10n;
   final bool acceptInvalidCertificates;
 
-  late final MpvPlayer _mpv;
+  late final MpvController _mpv;
   final _state = ValueNotifier(const PlayerState());
   final _events = StreamController<PlayerEvent>.broadcast(sync: true);
   final _osdReady = Completer<void>();
@@ -94,7 +95,19 @@ final class MpvBackend implements PlayerBackend {
     debugPrint('[mpv] options: ${[for (final e in options.entries) if (e.key != 'wid') '${e.key}=${e.value}'].join(' ')}');
     if (logFile != null) debugPrint('[mpv] detailed log: $logFile');
     try {
-      _mpv = MpvPlayer.create(options: options, logLevel: _settings.detailedLog ? 'info' : 'warn');
+      // Process isolation: run mpv in its own process so its D3D11/Vulkan VO
+      // swapchain no longer shares a heap with Flutter's ANGLE swapchain.
+      // AUSHD_MPV_IPC=0 restores the legacy in-process FFI player.
+      final ipc = Platform.environment['AUSHD_MPV_IPC'] != '0';
+      if (ipc && !Host.isLinux) {
+        debugPrint('[mpv] using isolated player process (IPC)');
+        _mpv = MpvIpcPlayer.create(
+          options: options,
+          logLevel: _settings.detailedLog ? 'info' : 'warn',
+        );
+      } else {
+        _mpv = MpvPlayer.create(options: options, logLevel: _settings.detailedLog ? 'info' : 'warn');
+      }
     } catch (e) {
       debugPrint('[mpv] initialization failed with these options: $e');
       rethrow;

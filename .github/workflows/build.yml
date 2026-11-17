@@ -160,12 +160,29 @@ jobs:
             echo "release lookup failed (attempt $attempt)"
             sleep 3
           done
-          url=$(python -c "import json,re; d=json.load(open('release.json')); print(next(a['browser_download_url'] for a in d['assets'] if re.match(r'mpv-dev-x86_64-\d', a['name'])))")
-          echo "libmpv source: $url"
-          curl -sfL --retry 3 --retry-delay 2 -o mpv-dev.7z "$url"
+          dev_url=$(python -c "import json,re; d=json.load(open('release.json')); print(next(a['browser_download_url'] for a in d['assets'] if re.match(r'mpv-dev-x86_64-\d', a['name'])))")
+          echo "libmpv source: $dev_url"
+          curl -sfL --retry 3 --retry-delay 2 -o mpv-dev.7z "$dev_url"
           7z e -y -ompv-dev mpv-dev.7z '*.dll'
           mv mpv-dev/libmpv-2.dll windows/libs/libmpv-2.dll
-          ls -lh windows/libs
+
+          # Isolated player process: ship a standalone mpv.exe (with all its
+          # runtime DLLs) in a `player/` subfolder so video rendering happens
+          # in a separate process from Flutter's ANGLE/D3D11 swapchain.
+          player_url=$(python -c "import json,re; d=json.load(open('release.json')); print(next(a['browser_download_url'] for a in d['assets'] if re.match(r'mpv-x86_64-\d', a['name'])))")
+          echo "standalone player source: $player_url"
+          curl -sfL --retry 3 --retry-delay 2 -o mpv-player.7z "$player_url"
+          mkdir -p windows/libs/player
+          7z x -y -ompv-player mpv-player.7z
+          # The shinchiro mpv-x86_64 build is a self-contained static mpv.exe;
+          # it only needs d3dcompiler_43.dll. Keeping it separate from the
+          # main process's libmpv-2.dll is the whole point of isolation.
+          cp -f mpv-player/mpv.exe windows/libs/player/mpv.exe
+          if [ -f mpv-player/d3dcompiler_43.dll ]; then
+            cp -f mpv-player/d3dcompiler_43.dll windows/libs/player/
+          fi
+          test -f windows/libs/player/mpv.exe || { echo "::error::mpv.exe missing from player bundle"; exit 1; }
+          ls -lh windows/libs windows/libs/player
 
       - name: Install Inno Setup
         if: matrix.platform == 'windows'
@@ -182,6 +199,17 @@ jobs:
             --dart-define=AUSHD_DIST_URL="$AUSHD_DIST_URL" \
             --dart-define=AUSHD_HUB_URL="$AUSHD_HUB_URL" \
             --dart-define=AUSHD_CHANNEL=stable
+
+      - name: Stage isolated player (Windows)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE="build/windows/x64/runner/Release"
+          mkdir -p "$RELEASE/player"
+          cp -f windows/libs/player/* "$RELEASE/player/"
+          echo "staged isolated player:"
+          ls -lh "$RELEASE/player" | head -20
 
       - name: Package Windows installer
         if: matrix.platform == 'windows'
