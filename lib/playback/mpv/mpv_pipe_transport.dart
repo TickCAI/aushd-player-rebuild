@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show utf8;
 import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -33,17 +34,20 @@ void _pipeReaderLoop(Map<String, dynamic> args) {
   final avail = malloc<Uint32>();
   final peeked = malloc<Uint32>();
   final left = malloc<Uint32>();
-  final pending = StringBuffer();
+  // Buffer raw bytes, not Dart strings: a UTF-8 sequence (e.g. a Chinese
+  // character) can be split across two ReadFile calls. Decoding per read would
+  // corrupt it, so only decode a complete line after splitting on 0x0A.
+  final pending = BytesBuilder();
 
   void emitLines() {
-    var text = pending.toString();
-    int nl;
-    while ((nl = text.indexOf('\n')) >= 0) {
-      out.send(text.substring(0, nl));
-      text = text.substring(nl + 1);
+    final data = pending.takeBytes();
+    var start = 0;
+    for (var i = 0; i < data.length; i++) {
+      if (data[i] != 0x0A) continue;
+      out.send(utf8.decode(data.sublist(start, i), allowMalformed: true));
+      start = i + 1;
     }
-    pending.clear();
-    pending.write(text);
+    if (start < data.length) pending.add(data.sublist(start));
   }
 
   Future<void> loop() async {
@@ -61,8 +65,7 @@ void _pipeReaderLoop(Map<String, dynamic> args) {
         read.value = 0;
         final got = readFile(handle, buffer, 16384, read, nullptr);
         if (got == 0 || read.value == 0) break;
-        pending.write(String.fromCharCodes(
-            buffer.asTypedList(read.value)));
+        pending.add(Uint8List.fromList(buffer.asTypedList(read.value)));
         emitLines();
       } else {
         await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -155,14 +158,30 @@ final class MpvPipeTransport {
   /// Sends one already newline-terminated JSON command to mpv.
   void write(String line) {
     if (_closed) return;
-    final bytes = line.codeUnits;
-    final buffer = malloc<Uint8>(bytes.length + 1);
+    // A JSON command carries user-visible text (titles, localized strings,
+    // subtitles). codeUnits are UTF-16 code units, not UTF-8 bytes: truncating
+    // them with & 0xFF corrupts non-ASCII text and can even emit 0x0A/0x00,
+    // splitting one command into several and breaking the JSON framing.
+    final bytes = utf8.encode(line);
+    final buffer = malloc<Uint8>(bytes.length);
     final written = malloc<Uint32>();
     try {
       for (var i = 0; i < bytes.length; i++) {
-        buffer[i] = bytes[i] & 0xFF;
+        buffer[i] = bytes[i];
       }
-      _writeFile(_handle, buffer.cast<Void>(), bytes.length, written, nullptr);
+      var offset = 0;
+      while (offset < bytes.length) {
+        written.value = 0;
+        final ok = _writeFile(
+          _handle,
+          buffer.elementAt(offset).cast<Void>(),
+          bytes.length - offset,
+          written,
+          nullptr,
+        );
+        if (ok == 0 || written.value == 0) break;
+        offset += written.value;
+      }
     } finally {
       malloc.free(buffer);
       malloc.free(written);

@@ -69,15 +69,24 @@ void main() {
       expect(data.first['demux-channel-count'], 2);
     });
 
-    test('maps Lua script-message to client message for zerk-event', () {
+    test('maps real client-message event to MpvClientMessage', () {
+      // mpv 0.38+ delivers script-message as `client-message` (verified against
+      // mpv v0.42.0). No `prefix` field: the script name is not included.
       final line = jsonEncode({
-        'event': 'message',
-        'prefix': 'zerk_osd',
+        'event': 'client-message',
         'args': ['zerk-event', 'ready'],
       });
       final msg = IpcMessage.parse(line);
       final client = msg?.event as MpvClientMessage;
       expect(client.args, ['zerk-event', 'ready']);
+    });
+
+    test('also accepts legacy message event name', () {
+      final msg = IpcMessage.parse(jsonEncode({
+        'event': 'message',
+        'args': ['zerk-event', 'ready'],
+      }));
+      expect((msg?.event as MpvClientMessage).args, ['zerk-event', 'ready']);
     });
 
     test('parses log-message event', () {

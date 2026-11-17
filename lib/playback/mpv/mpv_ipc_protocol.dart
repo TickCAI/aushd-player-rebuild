@@ -94,9 +94,12 @@ final class IpcMessage {
           propertyValue: map['data'],
           propertyId: (map['id'] as num?)?.toInt(),
         );
+      // A Lua script's `mp.commandv("script-message", ...)` is delivered to
+      // JSON IPC clients as `event: "client-message"` (mpv 0.38+). Older builds
+      // and some paths call it `message`; accept both so script replies such
+      // as `zerk-event ready` are never dropped.
+      case 'client-message':
       case 'message':
-        // `script-message` from a Lua script arrives as event "message" with
-        // the script id and the argument array in `args`.
         final args = map['args'];
         if (args is List) {
           return IpcMessage._(
