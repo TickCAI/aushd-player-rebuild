@@ -47,6 +47,14 @@ final class MpvIpcPlayer implements MpvController {
   int _requestId = 0;
   final Map<int, Completer<Object?>> _replies = {};
 
+  // create() returns before _start() finishes spawning mpv and connecting the
+  // pipe. Commands issued in that window (notably load-script from the backend)
+  // must be queued instead of dropped, or the OSD script never loads.
+  final List<String> _pendingWrites = [];
+  // Snapshot of the first-start commands (load-script, localized strings,
+  // config...). Replayed after a crash restart so the OSD comes back too.
+  List<String> _startupLines = const [];
+
   /// The last loaded URL, kept so a crashed player can be brought back.
   String? _lastLoadCommand;
   Duration _lastPosition = Duration.zero;
@@ -97,6 +105,13 @@ final class MpvIpcPlayer implements MpvController {
         onLine: _onLine,
         onDone: _onPipeDone,
       );
+      // Flush commands that arrived before the pipe was ready (first start:
+      // load-script/strings/config; restart: replayed startup commands).
+      for (final line in _pendingWrites) {
+        _transport!.write(line);
+      }
+      if (_startupLines.isEmpty) _startupLines = List<String>.from(_pendingWrites);
+      _pendingWrites.clear();
       _observeAll();
       _starting = false;
     } catch (e) {
@@ -172,11 +187,20 @@ final class MpvIpcPlayer implements MpvController {
   }
 
   Future<Object?> _request(List<String> args) async {
-    if (_transport == null || _disposed) return null;
+    if (_disposed) return null;
     final id = ++_requestId;
     final completer = Completer<Object?>();
     _replies[id] = completer;
-    _transport!.write(ipcCommand(args, requestId: id));
+    final line = ipcCommand(args, requestId: id);
+    final transport = _transport;
+    if (transport == null) {
+      // Pipe not connected yet. Queue the serialized command; _start() flushes
+      // it as soon as mpv's IPC server is reachable. Dropping it here was the
+      // reason the OSD script never loaded in the isolated-process build.
+      _pendingWrites.add(line);
+    } else {
+      transport.write(line);
+    }
     return completer.future.timeout(const Duration(seconds: 5), onTimeout: () {
       _replies.remove(id);
       return null;
@@ -275,6 +299,10 @@ final class MpvIpcPlayer implements MpvController {
     await _stderrSub?.cancel();
     _replies.clear();
     _starting = false;
+    // The new mpv process has a fresh Lua VM, so the OSD script and its state
+    // must be re-injected. Queue the startup snapshot before _start connects;
+    // it will be flushed together with any early commands.
+    _pendingWrites.addAll(_startupLines);
     // Wait briefly for the old process to fully exit before rebinding a pipe.
     await Future<void>.delayed(const Duration(milliseconds: 400));
     await _start();
