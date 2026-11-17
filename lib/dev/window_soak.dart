@@ -24,7 +24,7 @@ import '../core/windows/native_window.dart';
 /// `window_manager.isFullScreen()` is recorded as a diagnostic, never as an
 /// oracle: the app drives fullscreen through its own `zerk/window` channel plus
 /// a `GWL_STYLE` rewrite, so the plugin's cached flag is stale by construction.
-/// Grading a second, structurally unreachable authority is not a test â€” it is
+/// Grading a second, structurally unreachable authority is not a test â€?it is
 /// the "two fullscreen authorities" defect the plan is fixing.
 ///
 /// Enabled by `AUSHD_WINDOW_SOAK=<iterations>`; the report goes to
@@ -127,15 +127,15 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
     if (!ok) _violations.add('$label: $detail');
   }
 
-  String _fmt(Size s) => '${s.width.toStringAsFixed(0)}x${s.height.toStringAsFixed(0)}';
+  String _fmt(Rect r) => '${r.width.toStringAsFixed(0)}x${r.height.toStringAsFixed(0)}';
 
   /// Windows rounds the client rect; 2 px is noise, more is drift.
-  bool _near(Size a, Size b, [double tol = 2]) =>
+  bool _near(Rect a, Rect b, [double tol = 2]) =>
       (a.width - b.width).abs() <= tol && (a.height - b.height).abs() <= tol;
 
   /// After a racy probe either rect may win, but a "fullscreen" claim backed by
   /// the baseline rect means the reported state and the window disagree.
-  bool _coversAnything(Size got, Size? fsRef, Size base) {
+  bool _coversAnything(Rect got, Rect? fsRef, Rect base) {
     if (fsRef != null && _near(got, fsRef)) return true;
     return !_near(got, base) && got.width >= base.width && got.height >= base.height;
   }
@@ -166,7 +166,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
           '(stale by design: the app bypasses the plugin, not a gate)');
 
       final framesBefore = _frames.length;
-      Size? fsRef;
+      Rect? fsRef;
       var driftCount = 0;
       var desyncCount = 0;
 
@@ -209,7 +209,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
             report.line('[soak] i=$i concurrent-toggle settled='
                 '${afterProbe ? 'fullscreen' : 'windowed'} bounds=${_fmt(afterBounds)}');
             // Three toggles serialise to "not beforeProbe"; a race may land
-            // either way, so the winner is not graded â€” only that the reported
+            // either way, so the winner is not graded â€?only that the reported
             // state and the geometry still describe the same window.
             if (afterProbe) {
               _expect('i=$i probe', _coversAnything(afterBounds, fsRef, base),
@@ -220,7 +220,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
             }
             if (afterProbe == beforeProbe) {
               report.line('[soak] i=$i concurrent-toggle note: three toggles did not flip the state '
-                  '(racy or lost update) â€” recorded, not gated here');
+                  '(racy or lost update) â€?recorded, not gated here');
             }
           } catch (e) {
             _expect('i=$i probe', false, 'concurrent toggle threw: $e');
