@@ -4,9 +4,14 @@
 
 #include "flutter_window.h"
 #include "utils.h"
+#include "crash_dump.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
+  // Install before any GPU/window work so a native crash during startup is
+  // captured too. Flutter's own handler is chained, not replaced.
+  ::aushd::InstallCrashDumpHandler();
+  ::aushd::WriteEnvironmentSnapshot();
   // Optional diagnostic escape hatch, off by default. Setting
   // AUSHD_ANGLE_PLATFORM=swiftshader (or gl) asks ANGLE to keep the Flutter
   // UI off D3D11, which leaves mpv as the only D3D11 client in the process.
