@@ -24,7 +24,7 @@ import '../core/windows/native_window.dart';
 /// `window_manager.isFullScreen()` is recorded as a diagnostic, never as an
 /// oracle: the app drives fullscreen through its own `zerk/window` channel plus
 /// a `GWL_STYLE` rewrite, so the plugin's cached flag is stale by construction.
-/// Grading a second, structurally unreachable authority is not a test â€?it is
+/// Grading a second, structurally unreachable authority is not a test - it is
 /// the "two fullscreen authorities" defect the plan is fixing.
 ///
 /// Enabled by `AUSHD_WINDOW_SOAK=<iterations>`; the report goes to
@@ -209,7 +209,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
             report.line('[soak] i=$i concurrent-toggle settled='
                 '${afterProbe ? 'fullscreen' : 'windowed'} bounds=${_fmt(afterBounds)}');
             // Three toggles serialise to "not beforeProbe"; a race may land
-            // either way, so the winner is not graded â€?only that the reported
+            // either way, so the winner is not graded - only that the reported
             // state and the geometry still describe the same window.
             if (afterProbe) {
               _expect('i=$i probe', _coversAnything(afterBounds, fsRef, base),
@@ -220,7 +220,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
             }
             if (afterProbe == beforeProbe) {
               report.line('[soak] i=$i concurrent-toggle note: three toggles did not flip the state '
-                  '(racy or lost update) â€?recorded, not gated here');
+                  '(racy or lost update) - recorded, not gated here');
             }
           } catch (e) {
             _expect('i=$i probe', false, 'concurrent toggle threw: $e');
