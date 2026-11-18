@@ -165,6 +165,20 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
       report.line('[soak] diagnostic window_manager.isFullScreen=$pluginSays '
           '(stale by design: the app bypasses the plugin, not a gate)');
 
+      // The frame budget has to be measured on this machine. A GPU-less runner
+      // rasterises in WARP, where an absolute p99 measures the environment and
+      // not the app, so the gate is relative: one quiet window, then transitions
+      // are graded against what this box can already do.
+      final idleStart = _frames.length;
+      await _settle(1200);
+      final idleSpans = _frames.sublist(idleStart)..sort();
+      final idleIdx = (idleSpans.length * 0.99).floor();
+      final idleP99 = idleSpans.isEmpty
+          ? 0
+          : idleSpans[idleIdx < idleSpans.length ? idleIdx : idleSpans.length - 1];
+      report.line('[soak] idle frames=${idleSpans.length} p99=${idleP99 ~/ 1000}ms '
+          'worst=${idleSpans.isEmpty ? 0 : idleSpans.last ~/ 1000}ms');
+
       final framesBefore = _frames.length;
       Rect? fsRef;
       var driftCount = 0;
@@ -262,7 +276,8 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
 
       final newFrames = _frames.length - framesBefore;
       final expectedFrames = widget.iterations * 2;
-      final sorted = [..._frames]..sort();
+      final transitionSpans = _frames.sublist(framesBefore);
+      final sorted = [...transitionSpans]..sort();
       final idx = (sorted.length * 0.99).floor();
       final p99 = sorted.isEmpty ? 0 : sorted[idx < sorted.length ? idx : sorted.length - 1];
       report.line('[soak] frames=$newFrames expected>=~$expectedFrames '
@@ -272,10 +287,17 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
       // thread stalled during transitions.
       _expect('frames', newFrames >= widget.iterations, 'raster stalled: $newFrames frames for '
           '${widget.iterations} fullscreen round trips');
-      // Only p99 is gated: a single worst-frame spike is the very thing the
-      // user sees as jank, but on a GPU-less runner it is also the environment.
-      // It is reported above with its real number instead of hidden.
-      _expect('frames', p99 < 50000, 'p99 frame span ${p99 ~/ 1000}ms exceeds 50ms budget');
+      // Only p99 is gated: a single worst-frame spike is what the user sees as
+      // jank, but on a GPU-less runner it is also the environment, so it stays
+      // reported with its real number. The budget is 3x this box's idle p99
+      // with a 50ms floor, so a systematic transition stall still fails and a
+      // slow runner does not.
+      final budget = idleP99 * 3 > 50000 ? idleP99 * 3 : 50000;
+      report.line('[soak] transition frame budget=${budget ~/ 1000}ms '
+          '(3x idle p99 ${idleP99 ~/ 1000}ms, floor 50ms)');
+      _expect('frames', p99 <= budget,
+          'p99 frame span ${p99 ~/ 1000}ms exceeds the ${budget ~/ 1000}ms budget '
+          '(idle p99 ${idleP99 ~/ 1000}ms)');
 
       code = _violations.isEmpty ? 0 : 1;
     } catch (e, st) {
