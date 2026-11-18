@@ -176,8 +176,13 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
       final idleP99 = idleSpans.isEmpty
           ? 0
           : idleSpans[idleIdx < idleSpans.length ? idleIdx : idleSpans.length - 1];
-      report.line('[soak] idle frames=${idleSpans.length} p99=${idleP99 ~/ 1000}ms '
-          'worst=${idleSpans.isEmpty ? 0 : idleSpans.last ~/ 1000}ms');
+      // Median, not p99: the quiet window still contains the first frame after
+      // the resize, and on WARP that single frame is hundreds of milliseconds.
+      // Grading against a p99 built from 40 samples would let one warmup sample
+      // disable the gate entirely.
+      final idleMedian = idleSpans.isEmpty ? 0 : idleSpans[idleSpans.length ~/ 2];
+      report.line('[soak] idle frames=${idleSpans.length} median=${idleMedian ~/ 1000}ms '
+          'p99=${idleP99 ~/ 1000}ms worst=${idleSpans.isEmpty ? 0 : idleSpans.last ~/ 1000}ms');
 
       final framesBefore = _frames.length;
       Rect? fsRef;
@@ -292,12 +297,12 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
       // reported with its real number. The budget is 3x this box's idle p99
       // with a 50ms floor, so a systematic transition stall still fails and a
       // slow runner does not.
-      final budget = idleP99 * 3 > 50000 ? idleP99 * 3 : 50000;
+      final budget = idleMedian * 4 > 50000 ? idleMedian * 4 : 50000;
       report.line('[soak] transition frame budget=${budget ~/ 1000}ms '
-          '(3x idle p99 ${idleP99 ~/ 1000}ms, floor 50ms)');
+          '(4x idle median ${idleMedian ~/ 1000}ms, floor 50ms)');
       _expect('frames', p99 <= budget,
           'p99 frame span ${p99 ~/ 1000}ms exceeds the ${budget ~/ 1000}ms budget '
-          '(idle p99 ${idleP99 ~/ 1000}ms)');
+          '(idle median ${idleMedian ~/ 1000}ms)');
 
       code = _violations.isEmpty ? 0 : 1;
     } catch (e, st) {
