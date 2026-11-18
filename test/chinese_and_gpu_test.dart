@@ -8,30 +8,33 @@ import 'package:zerk_play/ui/widgets/net_image.dart';
 void main() {
   setUp(() => ContentZh.uiLanguage = 'zh');
 
-  test('graphics API defaults to Vulkan and survives a settings round trip', () {
+  test('the Windows default is the d3d11 path with no dump against it', () {
     const defaults = PlayerSettings();
-    expect(defaults.gpuApi, 'vulkan');
+    expect(defaults.gpuApi, 'd3d11');
+    expect(defaults.videoOutput, 'gpu');
+    expect(defaults.hwdec, 'd3d11va');
     expect(defaults.gpuApiAuto, isTrue);
-    final saved = defaults.copyWith(gpuApi: 'd3d11', gpuApiAuto: false).toJson();
-    expect(saved['gpuApi'], 'd3d11');
+    final saved = defaults.copyWith(gpuApi: 'vulkan', gpuApiAuto: false).toJson();
+    expect(saved['gpuApi'], 'vulkan');
     expect(saved['gpuApiAuto'], isFalse);
-    expect(PlayerSettings.fromJson(saved).gpuApi, 'd3d11');
+    expect(PlayerSettings.fromJson(saved).gpuApi, 'vulkan');
     expect(PlayerSettings.fromJson(saved).gpuApiAuto, isFalse);
-    // An older settings blob without the new keys keeps the safe default and
-    // is still eligible for the automatic migration away from D3D11.
+    // A blob from before the API selector existed keeps the current default and
+    // stays eligible for the untouched-install correction.
     final old = PlayerSettings.fromJson(const <String, dynamic>{'vo': 'gpu-next'});
-    expect(old.gpuApi, 'vulkan');
+    expect(old.gpuApi, 'd3d11');
     expect(old.gpuApiAuto, isTrue);
   });
 
   test('mpv pins a matching GPU context and avoids flip-model D3D11 swapchains', () {
-    final d3d = buildMpvOptions(settings: const PlayerSettings(gpuApi: 'd3d11', hwdec: 'd3d11va'));
-    final vulkan = buildMpvOptions(settings: const PlayerSettings(hwdec: 'd3d11va'));
+    final d3d = buildMpvOptions(settings: const PlayerSettings());
+    final vulkan = buildMpvOptions(settings: const PlayerSettings(gpuApi: 'vulkan', hwdec: 'd3d11va'));
     final opengl = buildMpvOptions(settings: const PlayerSettings(gpuApi: 'opengl'));
     expect(d3d['gpu-api'], 'd3d11');
     expect(d3d['gpu-context'], 'd3d11');
     expect(d3d['d3d11-flip'], 'no');
     expect(d3d['hwdec'], 'd3d11va');
+    expect(d3d['vo'], 'gpu');
     expect(vulkan['gpu-api'], 'vulkan');
     expect(vulkan['gpu-context'], 'winvk');
     expect(vulkan['hwdec'], 'auto-safe');
@@ -41,25 +44,34 @@ void main() {
     expect(opengl['vo'], 'gpu');
   });
 
-  test('render guard migrates old defaults and steps down after a native crash', () {
-    final old = PlayerSettings.fromJson(const <String, dynamic>{'gpuApi': 'd3d11'});
-    expect(RenderGuard.migrateDefault(old).gpuApi, 'vulkan');
-    const manual = PlayerSettings(gpuApi: 'd3d11', gpuApiAuto: false);
+  test('the render guard remembers a dead mode instead of editing settings', () {
+    // An install that never picked a backend itself is corrected to the path
+    // that has not crashed; a manual pick is never touched.
+    final legacy = PlayerSettings.fromJson(const <String, dynamic>{'gpuApi': 'vulkan'});
+    expect(RenderGuard.migrateDefault(legacy).gpuApi, 'd3d11');
+    const manual = PlayerSettings(gpuApi: 'vulkan', gpuApiAuto: false);
     expect(identical(RenderGuard.migrateDefault(manual), manual), isTrue);
 
-    final first = RenderGuard.fallback(manual, 1);
-    expect(first.gpuApi, 'vulkan');
-    expect(first.hwdec, 'auto-safe');
-    expect(first.gpuApiAuto, isFalse);
+    expect(
+      RenderGuard.fingerprint(vo: 'gpu', api: 'd3d11', gpuContext: 'd3d11', hwdec: 'd3d11va'),
+      'vo=gpu api=d3d11 context=d3d11 hwdec=d3d11va',
+    );
+    expect(RenderGuard.nextApi('d3d11'), 'vulkan');
+    expect(RenderGuard.nextApi('vulkan'), 'opengl');
+    expect(RenderGuard.nextApi('opengl'), 'd3d11');
 
-    final second = RenderGuard.fallback(first, 2);
-    expect(second.gpuApi, 'opengl');
-    expect(second.videoOutput, 'gpu');
-    expect(second.hwdec, 'no');
-
-    // A crash that already happened on Vulkan must not "step down" to it.
-    const vulkan = PlayerSettings(gpuApi: 'vulkan');
-    expect(RenderGuard.fallback(vulkan, 1).gpuApi, 'opengl');
+    // The recorded combination steps one rung down, for this launch only.
+    const dead = 'vo=gpu api=d3d11 context=d3d11 hwdec=d3d11va';
+    final avoided = resolveMpvMode(settings: const PlayerSettings(), avoid: dead);
+    expect(avoided.api, 'vulkan');
+    expect(avoided.avoided, isTrue);
+    // Any other mode is used exactly as asked.
+    final normal = resolveMpvMode(
+      settings: const PlayerSettings(),
+      avoid: 'vo=gpu api=opengl context=win hwdec=no',
+    );
+    expect(normal.api, 'd3d11');
+    expect(normal.avoided, isFalse);
   });
 
   test('Chinese content adaptation covers genres, languages, roles and collections', () {

@@ -6,113 +6,126 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'player_settings.dart';
 
-/// Keeps playback off a graphics backend that has crashed the process.
+/// Remembers which render path was live when a playback session died.
 ///
-/// The AMD D3D11 user-mode driver (`amdxx64.dll`) can fault while a swapchain
-/// is resized by a fullscreen switch or destroyed when playback exits. That is
-/// a native crash: no Dart exception, no clean shutdown, and the log simply
-/// stops. A marker is written while a playback session is alive and cleared
-/// shortly after it ends; if the marker survives into the next launch, the
-/// renderer is stepped down to a backend that avoids the D3D11 presentation
-/// path. A graphics API that cannot even initialize is stepped down at once.
+/// The guard used to rewrite the user's settings on every crash: the first
+/// crash moved an untouched install to Vulkan, the second moved it to WGL
+/// OpenGL with software decoding, and nothing ever moved it back. The two
+/// crashes that were actually caught then turned out to have happened on
+/// (gpu-next, Vulkan) and on (gpu, OpenGL) - both ends of that ladder. So the
+/// ladder was recording the history of our guesses in the user's profile, not
+/// the cause.
+///
+/// It now only remembers. The mode fingerprint that was live when the process
+/// died is stored, the next launch steers around exactly that combination, and
+/// after [cleanToForget] sessions that end normally the memory is dropped. A
+/// crash no longer edits what the user chose.
 abstract final class RenderGuard {
-  static const _key = 'render.guard.v1';
+  static const _key = 'render.memory.v1';
 
   /// Give the native VO teardown time to finish. A crash in
-  /// `vo/gpu-next/win32 uninit` happens after the user pressed back but before
-  /// mpv is gone, so clearing the marker immediately would hide that failure.
+  /// `vo/gpu/win32 uninit` happens after the user pressed back but before mpv
+  /// is gone, so clearing the marker immediately would hide that failure.
   static const _teardownGrace = Duration(seconds: 20);
 
+  /// Sessions that end normally before an avoided mode is forgotten.
+  static const cleanToForget = 3;
+
+  /// Windows render backends, in the order this project tries them.
+  static const apiLadder = ['d3d11', 'vulkan', 'opengl'];
+
   static Timer? _clearTimer;
-  static int _steps = 0;
+  static String? _avoid;
+  static int _clean = 0;
+
+  /// The mode fingerprint to steer around for this launch, when the previous
+  /// launch died during playback.
+  static String? get avoid => _avoid;
+
+  /// Sessions that ended without leaving the marker behind.
+  static int get cleanSessions => _clean;
+
+  /// Identifies a render path closely enough to recognise it again.
+  static String fingerprint({
+    required String vo,
+    required String api,
+    required String gpuContext,
+    required String hwdec,
+  }) =>
+      'vo=$vo api=$api context=$gpuContext hwdec=$hwdec';
+
+  /// The backend to try after [api] died. Wraps around the ladder so a crash on
+  /// the last rung still produces a different path.
+  static String nextApi(String api) {
+    final i = apiLadder.indexOf(api);
+    return apiLadder[(i < 0 ? 0 : i + 1) % apiLadder.length];
+  }
+
+  /// Corrects the default of installs that never picked a backend themselves.
+  ///
+  /// 1.0.5 wrote the untouched default out as Vulkan. That was the wrong
+  /// direction on this hardware: the recorded D3D11 death happened while the
+  /// driver was tearing a swapchain down, and Vulkan goes through the same
+  /// `amdxx64` user-mode driver. The (gpu, d3d11, blt presentation) path is the
+  /// one that has not produced a dump yet, so that is where an untouched
+  /// install belongs. A manual pick is never overwritten.
+  static PlayerSettings migrateDefault(PlayerSettings current) {
+    if (!current.gpuApiAuto || current.safeGpuApi == 'd3d11') return current;
+    return current.copyWith(gpuApi: 'd3d11', videoOutput: 'gpu', hwdec: 'd3d11va');
+  }
 
   /// Run once at startup, before any player is created.
   static Future<void> recoverOnStartup() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_key);
-      Map<String, dynamic> state = <String, dynamic>{};
       if (raw != null) {
         try {
-          state = jsonDecode(raw) as Map<String, dynamic>;
+          final state = jsonDecode(raw) as Map<String, dynamic>;
+          final clean = state['clean'];
+          _clean = clean is int ? clean : 0;
+          final mode = state['mode'];
+          final ended = state['ending'] == true;
+          _avoid = ended && mode is String && mode.isNotEmpty ? mode : null;
+          if (_avoid != null) {
+            debugPrint('[render-guard] the previous run died while rendering $_avoid; '
+                'this session avoids that combination (settings untouched)');
+          } else if (_clean > 0) {
+            debugPrint('[render-guard] $_clean clean session(s) so far');
+          }
         } catch (_) {}
       }
-      final steps = state['steps'];
-      _steps = steps is int ? steps : 0;
-
       final current = await PlayerSettings.load();
-      var next = current;
-
-      // Settings written by 1.0.4-1.0.7 still carry the old D3D11 default and
-      // have no "the user picked this" flag. Move those installs to Vulkan,
-      // which uses a different driver path entirely.
       final migrated = migrateDefault(current);
       if (!identical(migrated, current)) {
-        next = migrated;
-        debugPrint('[render-guard] moving untouched D3D11 default to Vulkan');
+        await migrated.save();
+        debugPrint('[render-guard] untouched legacy default moved to '
+            '${migrated.safeGpuApi}/${migrated.videoOutput}/${migrated.hwdec}');
       }
-
-      if (state['playing'] == true) {
-        _steps += 1;
-        next = fallback(next, _steps);
-        debugPrint('[render-guard] previous run died during playback (crash $_steps); '
-            'renderer now ${next.safeGpuApi}/${next.hwdec}');
-      }
-
-      if (!identical(next, current)) await next.save();
-      await _write(prefs, playing: false);
+      // Clears the "still running" flag; the avoided mode above stays loaded.
+      await _write(prefs, ending: false);
     } catch (e) {
       debugPrint('[render-guard] recovery failed: $e');
     }
   }
 
-  /// Pure default migration, kept separate so it can be unit tested. Only an
-  /// untouched D3D11 default is moved; a manual pick is never overwritten.
-  static PlayerSettings migrateDefault(PlayerSettings current) =>
-      current.gpuApiAuto && current.safeGpuApi == 'd3d11'
-          ? current.copyWith(gpuApi: 'vulkan')
-          : current;
-
-  /// Pure step-down policy, kept separate so it can be unit tested.
-  static PlayerSettings fallback(PlayerSettings current, int crashes) {
-    // First crash: move off D3D11 but keep hardware decoding. Any further
-    // crash (or a crash already on Vulkan) goes to the most conservative
-    // combination: WGL OpenGL, legacy VO and software decoding.
-    if (crashes <= 1 && current.safeGpuApi != 'vulkan') {
-      return current.copyWith(gpuApi: 'vulkan', hwdec: 'auto-safe', gpuApiAuto: false);
-    }
-    return current.copyWith(gpuApi: 'opengl', videoOutput: 'gpu', hwdec: 'no', gpuApiAuto: false);
-  }
-
-  /// Called when mpv could not be created or initialized at all (missing ICD,
-  /// unsupported GPU context, ...). Do not wait for a crash to step down.
-  static Future<void> notePlaybackFailure() async {
-    try {
-      final current = await PlayerSettings.load();
-      if (current.safeGpuApi == 'opengl' && current.hwdec == 'no') return;
-      final next = fallback(current, 99);
-      await next.save();
-      debugPrint('[render-guard] mpv failed to start on ${current.safeGpuApi}; '
-          'renderer stepped down to ${next.gpuApi}/${next.hwdec}');
-    } catch (e) {
-      debugPrint('[render-guard] could not step down after a failed start: $e');
-    }
-  }
-
-  /// Playback session is starting. Cancel any pending clear so a quick
-  /// play -> stop -> play sequence cannot erase the marker mid-session.
-  static Future<void> markPlaybackStarted() async {
+  /// Playback session is starting. Records the mode that is about to be used so
+  /// that a native fault after this point can be attributed to it. Cancels any
+  /// pending clear so a quick play -> stop -> play cannot erase the marker
+  /// mid-session.
+  static Future<void> markPlaybackStarted({required String mode}) async {
     _clearTimer?.cancel();
     _clearTimer = null;
     try {
-      await _write(await SharedPreferences.getInstance(), playing: true);
+      await _write(await SharedPreferences.getInstance(), ending: true, mode: mode);
+      debugPrint('[render-guard] session marked with $mode');
     } catch (e) {
-      debugPrint('[render-guard] could not persist playback marker: $e');
+      debugPrint('[render-guard] could not persist the playback marker: $e');
     }
   }
 
-  /// Playback ended (or failed). Keep the marker for a short grace period so a
-  /// native fault during VO teardown is still attributed to this session.
+  /// Playback ended. Keep the marker for [_teardownGrace] so a fault during VO
+  /// teardown is still attributed to this session.
   static void markPlaybackFinished() {
     _clearTimer?.cancel();
     _clearTimer = Timer(_teardownGrace, () async {
@@ -121,23 +134,34 @@ abstract final class RenderGuard {
     });
   }
 
-  /// Clean application exit. A native crash never reaches this callback, so a
-  /// surviving marker always means the previous run died unexpectedly.
+  /// Clean application exit, or a session that ended normally.
   static Future<void> finishClean() async {
     _clearTimer?.cancel();
     _clearTimer = null;
     try {
-      await _write(await SharedPreferences.getInstance(), playing: false);
+      final prefs = await SharedPreferences.getInstance();
+      _clean += 1;
+      if (_clean >= cleanToForget) {
+        _clean = 0;
+        if (_avoid != null) {
+          debugPrint('[render-guard] $cleanToForget clean sessions; forgetting $_avoid');
+          _avoid = null;
+        }
+      }
+      await _write(prefs, ending: false);
     } catch (e) {
-      debugPrint('[render-guard] could not clear playback marker: $e');
+      debugPrint('[render-guard] could not clear the playback marker: $e');
     }
   }
 
-  static Future<void> _write(SharedPreferences prefs, {required bool playing}) async {
-    await prefs.setString(_key, jsonEncode({
-          'playing': playing,
-          'steps': _steps,
+  static Future<void> _write(SharedPreferences prefs, {required bool ending, String? mode}) =>
+      prefs.setString(
+        _key,
+        jsonEncode({
+          'ending': ending,
+          'mode': ending ? mode : null,
+          'clean': _clean,
           'at': DateTime.now().toIso8601String(),
-        }));
-  }
+        }),
+      );
 }

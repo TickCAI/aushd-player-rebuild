@@ -21,6 +21,7 @@ import '../display_refresh.dart';
 import '../media3/osd_model.dart';
 import '../player_backend.dart';
 import '../player_settings.dart';
+import '../render_guard.dart';
 import '../trickplay.dart';
 import 'libmpv.dart' show MpvEndFileReason;
 import 'mpv_options.dart';
@@ -121,16 +122,15 @@ final class MpvBackend implements PlayerBackend {
   /// Without this, a dump can only be matched to "whatever the settings were at
   /// the time" - and the settings were the thing that had silently changed
   /// between the three crashes on record.
-  Future<void> _logSessionMode(String? logFile) async {
+  Future<void> _logSessionMode(String? logFile, MpvMode mode, String hwdec) async {
     var hdr = 'unknown';
     try {
       final status = await NativeWindow.hdrStatus().timeout(const Duration(seconds: 2));
       hdr = status.enabled ? 'on' : (status.supported ? 'off' : 'unsupported');
     } catch (_) {}
-    final mode = resolveMpvMode(settings: _settings);
     final displays = WidgetsBinding.instance.platformDispatcher.displays;
     final display = displays.isEmpty ? null : displays.first;
-    AppLog.write('[session] mode ${mode.describe()} hwdec=${_settings.hwdec} '
+    AppLog.write('[session] mode ${mode.describe()} hwdec=$hwdec '
         'flip=${mode.api == 'd3d11' ? 'no' : 'n/a'} '
         'fullscreen=${FullscreenController.instance.isFullscreen} hdr=$hdr '
         'display=${display == null ? 'none' : '${display.size.width.round()}x${display.size.height.round()}'
@@ -148,16 +148,32 @@ final class MpvBackend implements PlayerBackend {
         : await VideoHost.create().timeout(const Duration(seconds: 8),
             onTimeout: () => throw StateError('the video host did not respond within 8 s'));
     final logFile = _mpvLogPath();
+    // Resolved once so the options map, the mode memory and the log line cannot
+    // disagree about which driver path this session is about to take.
+    final mode = resolveMpvMode(settings: _settings, avoid: RenderGuard.avoid);
     final options = buildMpvOptions(
       wid: wid,
       settings: _settings,
+      mode: mode,
       acceptInvalidCertificates: acceptInvalidCertificates,
       logFile: logFile,
       osdFontsDir: Host.isLinux ? p.join(p.dirname(_osdScriptPath()), 'fonts') : null,
     );
+    final hwdec = options['hwdec'] ?? _settings.hwdec;
     debugPrint('[mpv] options: ${[for (final e in options.entries) if (e.key != 'wid') '${e.key}=${e.value}'].join(' ')}');
     if (logFile != null) debugPrint('[mpv] detailed log: $logFile');
-    unawaited(_logSessionMode(logFile));
+    // Recorded before mpv exists: a native fault inside create() has to be
+    // attributable to this exact render path, not to "whatever the settings
+    // happened to be".
+    await RenderGuard.markPlaybackStarted(
+      mode: RenderGuard.fingerprint(
+        vo: mode.vo,
+        api: mode.api,
+        gpuContext: mode.gpuContext,
+        hwdec: hwdec,
+      ),
+    );
+    unawaited(_logSessionMode(logFile, mode, hwdec));
     try {
       _mpv = MpvPlayer.create(options: options, logLevel: _settings.detailedLog ? 'info' : 'warn');
     } catch (e) {
@@ -257,6 +273,19 @@ final class MpvBackend implements PlayerBackend {
     await (show ? VideoHost.show() : VideoHost.hide());
   }
 
+  /// The native video window follows the picture, not the OSD phase.
+  ///
+  /// It used to be driven by `_curtain.phase == 'playing'`, so every OSD phase
+  /// change - loading, track switch, the pause hint - hid and re-showed the
+  /// mpv VO child window. Each re-show reconfigures the VO and rebuilds the
+  /// swapchain inside the driver that is already the suspect here. mpv draws
+  /// its own OSD on top of the video anyway (`zerk_osd.lua`), so the window has
+  /// no reason to disappear after the first frame has been presented.
+  void _syncVideoWindow() {
+    if (_closed) return;
+    unawaited(_showVideo(_framed));
+  }
+
   @override
   void load(Uri url, {Duration? start, int? audioOrdinal, int? subtitleOrdinal, String? dolbyVision}) {
     final opts = <String>[
@@ -289,8 +318,10 @@ final class MpvBackend implements PlayerBackend {
     if (command == 'next') unawaited(_sendNextImage(data is Map ? data['image'] as String? : null));
     if (command != 'state') return;
     _curtain.handle(command, data);
+    // A new load has no frame yet: drop the window so the previous picture
+    // cannot linger over the loading card. Every other phase keeps it up.
     if (_curtain.phase == 'loading') _framed = false;
-    unawaited(_showVideo(_curtain.phase == 'playing' && _framed));
+    _syncVideoWindow();
   }
 
   @override
@@ -374,6 +405,9 @@ final class MpvBackend implements PlayerBackend {
     _curtain.dispose();
     await _events.close();
     AppLog.write('[session] close done');
+    // The marker is cleared after a grace period rather than now, so a fault
+    // during the native teardown above is still attributed to this session.
+    RenderGuard.markPlaybackFinished();
   }
 
   /// Polls `vo-configured` until it matches [want].
@@ -400,7 +434,7 @@ final class MpvBackend implements PlayerBackend {
       case MpvPlaybackRestart():
         if (!_framed) debugPrint('[mpv] first frame (hwdec ${_mpv.state.value.hwdec})');
         _framed = true;
-        if (_curtain.phase == 'playing') unawaited(_showVideo(true));
+        _syncVideoWindow();
       case MpvEndFile(:final reason, :final error) when reason == MpvEndFileReason.error:
         debugPrint('[mpv] end of file: ERROR $error');
         _events.add(PlayerLoadError(error));

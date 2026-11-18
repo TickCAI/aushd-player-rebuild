@@ -1,44 +1,76 @@
 import '../../core/host.dart';
 import '../dialogue_downmix.dart';
 import '../player_settings.dart';
+import '../render_guard.dart';
 import '../subtitle_style.dart';
 
 /// The render path mpv will actually take, resolved once so that the options
 /// map and the "[session] mode" log line can never disagree about it.
 final class MpvMode {
-  const MpvMode({required this.vo, required this.api, required this.gpuContext});
+  const MpvMode({
+    required this.vo,
+    required this.api,
+    required this.gpuContext,
+    this.avoided = false,
+  });
 
   final String vo;
   final String api;
   final String gpuContext;
 
-  String describe() => 'vo=$vo api=$api context=$gpuContext';
+  /// True when this is not what the settings asked for, but the step taken to
+  /// avoid the combination that killed the previous session.
+  final bool avoided;
+
+  String describe() => 'vo=$vo api=$api context=$gpuContext${avoided ? ' (avoided)' : ''}';
 }
 
-MpvMode resolveMpvMode({required PlayerSettings settings}) {
-  final linux = Host.isLinux;
-  final own = !settings.mpvConfOnly;
-  final api = settings.safeGpuApi;
-  final vo = linux ? 'libmpv' : (own ? settings.videoOutput : 'gpu-next');
-  // gpu-next only supports d3d11/vulkan on Windows. If the user picked OpenGL
-  // to work around an AMD D3D11 crash, silently pair it with the legacy gpu VO
-  // rather than letting mpv_initialize fail before the player page appears.
-  final effectiveVo = (!linux && api == 'opengl' && vo == 'gpu-next') ? 'gpu' : vo;
-  // Without an explicit context mpv probes one that can fall back to ANGLE's
-  // D3D11 backend even when OpenGL was selected, so "OpenGL" would not leave
-  // the AMD D3D11 driver path that faults on swapchain teardown. winvk uses
-  // the Vulkan WSI; win is native WGL.
+typedef _Pair = ({String vo, String api, String gpuContext});
+
+/// Pairs an API with the VO and context that can actually present on it.
+///
+/// gpu-next only supports d3d11/vulkan on Windows. If OpenGL was picked to
+/// work around an AMD D3D11 crash, silently pair it with the legacy gpu VO
+/// rather than letting mpv_initialize fail before the player page appears.
+/// Without an explicit context mpv probes one that can fall back to ANGLE's
+/// D3D11 backend even when OpenGL was selected, so "OpenGL" would not leave the
+/// AMD D3D11 driver path that faults on swapchain teardown. winvk uses the
+/// Vulkan WSI; win is native WGL.
+_Pair _pair({required String api, required String vo}) {
+  final effectiveVo = (api == 'opengl' && vo == 'gpu-next') ? 'gpu' : vo;
   final gpuContext = switch (api) {
     'd3d11' => 'd3d11',
     'vulkan' => 'winvk',
     _ => 'win',
   };
-  return MpvMode(vo: effectiveVo, api: api, gpuContext: gpuContext);
+  return (vo: effectiveVo, api: api, gpuContext: gpuContext);
+}
+
+MpvMode resolveMpvMode({required PlayerSettings settings, String? avoid}) {
+  final linux = Host.isLinux;
+  final own = !settings.mpvConfOnly;
+  final requested = settings.safeGpuApi;
+  final vo = linux ? 'libmpv' : (own ? settings.videoOutput : 'gpu-next');
+  final pair = _pair(api: requested, vo: vo);
+  final fingerprint = RenderGuard.fingerprint(
+    vo: pair.vo,
+    api: pair.api,
+    gpuContext: pair.gpuContext,
+    hwdec: settings.hwdec,
+  );
+  if (linux || avoid == null || fingerprint != avoid) {
+    return MpvMode(vo: pair.vo, api: pair.api, gpuContext: pair.gpuContext);
+  }
+  // The previous session died on this exact path. Take the next backend down
+  // the ladder for this launch only; the settings stay as the user left them.
+  final step = _pair(api: RenderGuard.nextApi(pair.api), vo: vo);
+  return MpvMode(vo: step.vo, api: step.api, gpuContext: step.gpuContext, avoided: true);
 }
 
 Map<String, String> buildMpvOptions({
   int? wid,
   required PlayerSettings settings,
+  MpvMode? mode,
   bool acceptInvalidCertificates = false,
   String? logFile,
   String? osdFontsDir,
@@ -48,10 +80,10 @@ Map<String, String> buildMpvOptions({
   final bitstream = spdif.isNotEmpty;
   final own = !settings.mpvConfOnly;
   final linux = Host.isLinux;
-  final mode = resolveMpvMode(settings: settings);
-  final api = mode.api;
-  final gpuContext = mode.gpuContext;
-  final effectiveVo = mode.vo;
+  final resolved = mode ?? resolveMpvMode(settings: settings);
+  final api = resolved.api;
+  final gpuContext = resolved.gpuContext;
+  final effectiveVo = resolved.vo;
   final d3dDecode = settings.hwdec.startsWith('d3d11') ||
       settings.hwdec.startsWith('dxva2') ||
       settings.hwdec.startsWith('nvdec');
@@ -88,17 +120,21 @@ Map<String, String> buildMpvOptions({
     'idle': 'yes',
 
     'vo': effectiveVo,
-    // Windows used to be hard-coded to d3d11. Some AMD drivers crash inside
-    // amdxx64.dll when a D3D11 swapchain is resized by fullscreen or torn
-    // down on exit, so the default is now Vulkan and the API is selectable.
-    // D3D11 hardware decoding is tied to that API, so fall back to mpv's safe
-    // automatic decoder on the other backends.
+    // 1.0.5 switched the Windows default to Vulkan because amdxx64.dll had
+    // faulted on a D3D11 swapchain. That diagnosis picked the wrong variable:
+    // Vulkan runs through the same amdxx64 user-mode driver, and the two
+    // crashes that were caught afterwards landed on (gpu-next, Vulkan) and on
+    // (gpu, OpenGL). The default is back on (gpu, d3d11) with blt presentation
+    // and d3d11va, which has not produced a dump, and the deprecated
+    // flip-model path stays off. gpu-next/Vulkan remain selectable.
     if (!linux) 'gpu-api': api,
     if (!linux) 'gpu-context': gpuContext,
     if (own) ...{
       // Flip-model swapchains are what the AMD UMD trips over on a fullscreen
       // transition; blt presentation avoids that rebuild.
       if (!linux && api == 'd3d11') 'd3d11-flip': 'no',
+      // D3D11 decoding only exists on the D3D11 backend; anything else gets
+      // mpv's safe automatic decoder rather than a decoder that cannot init.
       'hwdec': d3dDecode && (linux || api != 'd3d11') ? 'auto-safe' : settings.hwdec,
       if (!linux) 'target-colorspace-hint': settings.hdrPassthrough ? 'yes' : 'no',
       'video-sync': !settings.smoothMotion ? 'audio' : (bitstream ? 'display-vdrop' : 'display-resample'),

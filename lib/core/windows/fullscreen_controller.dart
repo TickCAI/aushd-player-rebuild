@@ -55,6 +55,18 @@ final class FullscreenController {
 
   int get queued => _queued;
 
+  /// Restores the singleton to its initial state. Tests only: the controller is
+  /// one object for the whole process by design, so a test needs a way to put
+  /// the serialisation queue and the counters back.
+  @visibleForTesting
+  void debugReset() {
+    phase.value = FullscreenPhase.windowed;
+    _tail = Future<Object?>.value();
+    _transitions = 0;
+    _failures = 0;
+    _queued = 0;
+  }
+
   /// Adopts the native state without transitioning. Used once at startup: the
   /// window may already be fullscreen from the previous session.
   Future<void> sync() async {
