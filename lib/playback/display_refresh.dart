@@ -10,8 +10,32 @@ import 'kept_display.dart';
 final class DisplayRefreshMatcher {
   static String? _device;
 
+  /// Display mode switching is off in this build.
+  ///
+  /// Real-machine dumps from 2026-11-18 (five of them, one per attempt) show the
+  /// process dying on all three render backends - d3d11, vulkan and opengl - so
+  /// the backend was never the variable. What all five sessions had in common is
+  /// a mode change: `ChangeDisplaySettingsEx` to 75 Hz when the file loaded, and
+  /// back to 120 Hz on the way out (`[display] restoring the desktop refresh
+  /// rate`, 24 s after the player was already gone). The crash five seconds
+  /// later landed inside `flutter_windows.dll`, i.e. in ANGLE's surface, not in
+  /// mpv's.
+  ///
+  /// A mode change invalidates every surface the driver is holding, on a machine
+  /// with fifteen display outputs and a 200% DPI desktop. This switch exists to
+  /// make that a single variable: with it off, a crash means the surface
+  /// teardown itself is at fault (plan A2, mpv_render_context), and no crash
+  /// means the mode change was it. Either answer is worth more than another
+  /// backend guess.
+  static const bool modeSwitchingEnabled = false;
+
   double? matchFrameRate(double fps, {int? hwnd}) {
     if (!Platform.isWindows || fps < 10 || fps > 121) return null;
+    if (!modeSwitchingEnabled) {
+      debugPrint('[refresh] mode switching is disabled in this build; '
+          'staying at the desktop rate for ${fps.toStringAsFixed(3)} fps video');
+      return null;
+    }
     return using((arena) {
       final device = _monitorDevice(arena, hwnd ?? GetForegroundWindow());
       if (device == null) return null;
@@ -71,6 +95,10 @@ final class DisplayRefreshMatcher {
     if (device == null) return;
     _device = null;
     KeptDisplay.restoreRefresh = null;
+    if (!modeSwitchingEnabled) {
+      debugPrint('[refresh] restore skipped (mode switching disabled in this build)');
+      return;
+    }
     final rc = using((arena) => ChangeDisplaySettingsEx(device.toNativeUtf16(allocator: arena), nullptr, NULL, 0, nullptr));
     debugPrint('[refresh] restored $device to its desktop mode (rc $rc)');
   }

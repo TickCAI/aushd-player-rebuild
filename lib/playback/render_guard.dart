@@ -23,6 +23,13 @@ import 'player_settings.dart';
 abstract final class RenderGuard {
   static const _key = 'render.memory.v1';
 
+  /// The retired 1.0.5 guard's key. It recorded how many times it had stepped
+  /// the settings down a ladder, and 1.0.9 shipped installs whose backend was
+  /// rewritten by it (9 steps deep on the machine that produced the dumps).
+  /// Those writes are indistinguishable from a manual pick, so a poisoned
+  /// install needs this key as the evidence that the value was never chosen.
+  static const _legacyKey = 'flutter.render.guard.v1';
+
   /// Give the native VO teardown time to finish. A crash in
   /// `vo/gpu/win32 uninit` happens after the user pressed back but before mpv
   /// is gone, so clearing the marker immediately would hide that failure.
@@ -97,10 +104,33 @@ abstract final class RenderGuard {
         } catch (_) {}
       }
       final current = await PlayerSettings.load();
-      final migrated = migrateDefault(current);
+      var migrated = migrateDefault(current);
+      // The retired guard's ladder wrote our own crashes into the profile and
+      // then looked exactly like a manual pick. Rescue that install once, using
+      // the retired key as the evidence, then drop the key so that a pick made
+      // in the UI is never overwritten again.
+      var legacySteps = 0;
+      final legacyRaw = prefs.getString(_legacyKey);
+      if (legacyRaw != null) {
+        try {
+          final legacy = jsonDecode(legacyRaw) as Map<String, dynamic>;
+          final steps = legacy['steps'];
+          legacySteps = steps is int ? steps : 0;
+        } catch (_) {}
+      }
+      if (legacySteps > 0 &&
+          (current.safeGpuApi != 'd3d11' ||
+              current.videoOutput != 'gpu' ||
+              current.hwdec != 'd3d11va')) {
+        migrated = migrated.copyWith(gpuApi: 'd3d11', videoOutput: 'gpu', hwdec: 'd3d11va');
+        debugPrint('[render-guard] the retired guard had stepped this install down '
+            '$legacySteps time(s), ending at ${current.safeGpuApi}/'
+            '${current.videoOutput}/${current.hwdec}; moving it to d3d11/gpu/d3d11va once');
+        await prefs.remove(_legacyKey);
+      }
       if (!identical(migrated, current)) {
         await migrated.save();
-        debugPrint('[render-guard] untouched legacy default moved to '
+        debugPrint('[render-guard] render path is now '
             '${migrated.safeGpuApi}/${migrated.videoOutput}/${migrated.hwdec}');
       }
       // Clears the "still running" flag; the avoided mode above stays loaded.

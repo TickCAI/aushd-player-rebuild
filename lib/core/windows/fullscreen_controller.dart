@@ -105,6 +105,7 @@ final class FullscreenController {
 
   Future<bool> _apply(bool target) async {
     final previous = phase.value;
+    final started = DateTime.now();
     phase.value = target ? FullscreenPhase.entering : FullscreenPhase.exiting;
     _transitions++;
     var applied = false;
@@ -128,7 +129,10 @@ final class FullscreenController {
       );
       return false;
     }
-    AppLog.mark('[fullscreen] ${target ? 'enter' : 'exit'} ok');
+    // Measured here, not with AppLog.mark: mark stamps the time since process
+    // start, which read as "entering fullscreen took 47557 ms" in a real log.
+    final took = DateTime.now().difference(started).inMilliseconds;
+    AppLog.write('[fullscreen] ${target ? 'enter' : 'exit'} ok in $took ms');
     return true;
   }
 

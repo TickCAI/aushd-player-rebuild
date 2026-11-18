@@ -46,6 +46,22 @@ _Pair _pair({required String api, required String vo}) {
   return (vo: effectiveVo, api: api, gpuContext: gpuContext);
 }
 
+/// The decoder string mpv will actually receive.
+///
+/// [buildMpvOptions] rewrites a hardware decoder to `auto-safe` whenever the
+/// frame has to be copied out of the decoder's own backend (a d3d11va decoder on
+/// the Vulkan backend, for example). The mode fingerprint has to be built from
+/// this same string, or "the path that died" gets recorded with one hwdec and
+/// compared against another on the next launch - and the avoidance silently
+/// never fires. That was a real bug: the log announced "this session avoids
+/// vulkan" and then marked the session with vulkan.
+String effectiveHwdec({required PlayerSettings settings, required String api}) {
+  final d3dDecode = settings.hwdec.startsWith('d3d11') ||
+      settings.hwdec.startsWith('dxva2') ||
+      settings.hwdec.startsWith('nvdec');
+  return d3dDecode && (Host.isLinux || api != 'd3d11') ? 'auto-safe' : settings.hwdec;
+}
+
 MpvMode resolveMpvMode({required PlayerSettings settings, String? avoid}) {
   final linux = Host.isLinux;
   final own = !settings.mpvConfOnly;
@@ -56,7 +72,7 @@ MpvMode resolveMpvMode({required PlayerSettings settings, String? avoid}) {
     vo: pair.vo,
     api: pair.api,
     gpuContext: pair.gpuContext,
-    hwdec: settings.hwdec,
+    hwdec: effectiveHwdec(settings: settings, api: pair.api),
   );
   if (linux || avoid == null || fingerprint != avoid) {
     return MpvMode(vo: pair.vo, api: pair.api, gpuContext: pair.gpuContext);
@@ -84,9 +100,7 @@ Map<String, String> buildMpvOptions({
   final api = resolved.api;
   final gpuContext = resolved.gpuContext;
   final effectiveVo = resolved.vo;
-  final d3dDecode = settings.hwdec.startsWith('d3d11') ||
-      settings.hwdec.startsWith('dxva2') ||
-      settings.hwdec.startsWith('nvdec');
+  final hwdec = effectiveHwdec(settings: settings, api: api);
   return {
     if (wid != null) 'wid': '$wid',
     'log-file': ?logFile,
@@ -135,7 +149,7 @@ Map<String, String> buildMpvOptions({
       if (!linux && api == 'd3d11') 'd3d11-flip': 'no',
       // D3D11 decoding only exists on the D3D11 backend; anything else gets
       // mpv's safe automatic decoder rather than a decoder that cannot init.
-      'hwdec': d3dDecode && (linux || api != 'd3d11') ? 'auto-safe' : settings.hwdec,
+      'hwdec': hwdec,
       if (!linux) 'target-colorspace-hint': settings.hdrPassthrough ? 'yes' : 'no',
       'video-sync': !settings.smoothMotion ? 'audio' : (bitstream ? 'display-vdrop' : 'display-resample'),
       'interpolation': settings.smoothMotion ? 'yes' : 'no',

@@ -51,6 +51,12 @@ abstract final class AppLog {
     }
     write('[app] AusHD Player $appVersion (${kReleaseMode ? 'release' : kProfileMode ? 'profile' : 'debug'})');
     if (_sink != null) write('[log] writing to ${_sink!.file}');
+    // A native access violation ends the process without running any Dart or
+    // engine cleanup, so whatever is still sitting in the sink's buffer never
+    // reaches the disk - and the session that crashes is exactly the one whose
+    // log has to survive. The 2026-11-18 11:44 crash left no application log at
+    // all. Flushing once a second bounds that loss to the last second.
+    _flushTimer = Timer.periodic(const Duration(seconds: 1), (_) => unawaited(flush()));
     unawaited(LogSink.systemInfo().then((lines) {
       for (final line in lines) {
         write('[system] $line');
@@ -81,6 +87,7 @@ abstract final class AppLog {
   static int _slowFrames = 0, _frames = 0;
   static Duration _worst = Duration.zero;
   static Timer? _frameReport;
+  static Timer? _flushTimer;
 
   static set where(String value) {
     _where = value;
