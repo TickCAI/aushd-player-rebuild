@@ -66,7 +66,7 @@ final class FullscreenController {
 
   Future<bool> toggleFullScreen() => _enqueue(() async => !(await _readNative()));
 
-  Future<bool> _enqueue(Future<bool> Function() decide) {
+  Future<bool> _enqueue(FutureOr<bool> Function() decide) {
     _queued++;
     final completer = Completer<bool>();
     _tail = _tail.then((_) async {
