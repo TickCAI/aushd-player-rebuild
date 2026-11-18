@@ -63,7 +63,7 @@ Future<void> _noteLaunchFailure(Object error) async {
       message.contains('video host') ||
       message.contains('gpu') ||
       message.contains('vo=')) {
-    await RenderGuard.notePlaybackFailure();
+    await RenderGuard.noteLaunchFailure();
   }
 }
 
@@ -77,7 +77,6 @@ Future<PlaybackOutcome?> playItem(
 }) async {
   if (!_acquireLaunchLock()) return null;
   _setPlaying(true);
-  await RenderGuard.markPlaybackStarted();
   final l10n = context.l10n;
   try {
     final services = AppServicesScope.read(context);
@@ -157,7 +156,6 @@ Future<void> playShared(BuildContext context, LiveShare share, {ZapList? zap, in
   if (!_acquireLaunchLock()) return;
   _setPlaying(true);
   _live = true;
-  await RenderGuard.markPlaybackStarted();
   final l10n = context.l10n;
   try {
     final services = AppServicesScope.read(context);

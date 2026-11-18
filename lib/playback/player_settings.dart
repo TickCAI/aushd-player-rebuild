@@ -51,12 +51,16 @@ final class PlayerSettings {
     this.seekBackSeconds = 10,
     this.keepRefreshRate = false,
     this.keepHdr = false,
-    this.hwdec = 'auto-safe',
+    this.hwdec = 'd3d11va',
     this.videoQuality = VideoQuality.balanced,
     this.toneMapping = 'auto',
     this.deband = false,
-    this.videoOutput = 'gpu-next',
-    this.gpuApi = 'vulkan',
+    // Windows default, chosen from the dumps rather than from a guess: the
+    // legacy gpu VO with the d3d11 backend, blt presentation and d3d11va has
+    // not produced a crash here, while (gpu-next, Vulkan) and (gpu, OpenGL)
+    // both did. Both stay selectable in the settings.
+    this.videoOutput = 'gpu',
+    this.gpuApi = 'd3d11',
     this.gpuApiAuto = true,
     this.detailedLog = true,
     this.scopeScreen = 0,
@@ -130,7 +134,7 @@ final class PlayerSettings {
 
   /// A corrupted/old preference must never be handed to mpv verbatim: an
   /// unknown `gpu-api` fails mpv_initialize before the player page appears.
-  String get safeGpuApi => gpuApis.contains(gpuApi) ? gpuApi : 'vulkan';
+  String get safeGpuApi => gpuApis.contains(gpuApi) ? gpuApi : 'd3d11';
 
   final bool detailedLog;
 

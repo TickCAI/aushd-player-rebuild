@@ -117,6 +117,16 @@ final class PlaybackSession {
   bool _finishing = false;
   bool _lastPaused = false;
 
+  /// Bumped by every [_play] attempt and again when the session ends.
+  ///
+  /// A load that was still in flight used to keep going after the session had
+  /// decided to finish: it called `load()` / `selectTrack()` on a player whose
+  /// `_disposed` guard turned those into silent no-ops. That looked like a
+  /// clean cancellation while hiding the fact that the work went nowhere. Each
+  /// await now checks whether its generation is still the current one and says
+  /// so in the log when it is not.
+  int _playGen = 0;
+
   bool _hdrAutoEnabled = false;
 
   final _trickplay = <String, Future<Trickplay?>>{};
@@ -159,6 +169,7 @@ final class PlaybackSession {
   }
 
   Future<void> _play(PlaybackRequest request, {bool forceTranscode = false}) async {
+    final gen = ++_playGen;
     final item = request.item;
     final quality = _transcodeBitrate;
     final transcode = forceTranscode || quality > 0;
@@ -184,6 +195,7 @@ final class PlaybackSession {
         enableDirectPlay: !transcode,
         enableDirectStream: !transcode,
       );
+      if (_abandoned(gen, 'playback info')) return;
       final versions = item.mediaSources.length > 1
           ? item.mediaSources
           : request.mediaSourceId == null
@@ -225,7 +237,9 @@ final class PlaybackSession {
         stream = _api.resolve(item.id, info, mediaSourceId: source.id, streamSubtitles: streamSubs, transcode: transcode);
       }
       await _prepareHdr(VersionInfo(source).hdr != null);
-      if (_finishing) return;
+      // HDR negotiation can hold this path for several seconds; by the time it
+      // returns the user may have already left the player.
+      if (_abandoned(gen, 'hdr')) return;
 
       _current = _Current(
         item: item,
@@ -240,6 +254,7 @@ final class PlaybackSession {
           '${v?.videoRange}/${v?.extendedVideoType} '
           'audio=$audioIndex sub=$subtitleIndex start=$start url=${stream.url.path}');
 
+      if (_abandoned(gen, 'load')) return;
       _player.load(
         stream.url,
         start: start,
@@ -251,9 +266,21 @@ final class PlaybackSession {
       _prefetchNext(item);
     } catch (e) {
       debugPrint('[session] load failed: $e');
+      // A superseded or cancelled load is not a playback error; showing one
+      // would put an error card over a session that is already gone.
+      if (_finishing || gen != _playGen) return;
       _loading = false;
       _osdState('error', item, message: _friendlyError(l10n, e));
     }
+  }
+
+  /// True when [gen] no longer owns the player, with a log line saying where it
+  /// gave up. Silent no-ops are what made the last three releases unreadable.
+  bool _abandoned(int gen, String where) {
+    if (!_finishing && gen == _playGen) return false;
+    AppLog.write('[session] play abandoned at $where '
+        '(gen=$gen current=$_playGen finishing=$_finishing)');
+    return true;
   }
 
   static bool _needsServerTracks(MediaSourceInfo source, int? audioIndex, int? subtitleIndex,
@@ -934,6 +961,9 @@ final class PlaybackSession {
   Future<void> _finish(PlaybackEndReason reason) async {
     if (_finishing) return;
     _finishing = true;
+    // Any load still in flight is now stale, so its continuations stop before
+    // touching the player instead of being swallowed by its _disposed guard.
+    _playGen++;
     debugPrint('[session] finishing (${reason.name}) at ${_player.state.value.position}');
     // Anchors the ordered teardown sequence in the log. Anything that writes a
     // player/HDR/refresh line *above* this one came from a path that ran before
