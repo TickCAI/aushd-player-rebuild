@@ -66,6 +66,11 @@ class Win32Window {
   HWND window_handle_ = nullptr;
 
   HWND child_content_ = nullptr;
+
+  // WM_DESTROY already runs the teardown; the destructor used to run it a second
+  // time, which called OnDestroy twice and could decrement the active-window
+  // count twice, unregistering the window class while a window still used it.
+  bool destroyed_ = false;
 };
 
 #endif

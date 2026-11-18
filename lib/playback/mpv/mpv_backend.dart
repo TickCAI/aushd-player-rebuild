@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../core/host.dart';
 import '../../core/log/app_log.dart';
+import '../../core/windows/fullscreen_controller.dart';
 import '../../core/windows/native_window.dart';
 import '../../l10n/app_localizations.dart';
 import '../../ui/core/gamepad.dart';
@@ -549,8 +550,12 @@ final class MpvBackend implements PlayerBackend {
   }
 
   Future<void> _toggleFullscreen() async {
-    final fs = await NativeWindow.toggleFullScreen();
+    // Routed through the controller so an OSD-driven toggle cannot overlap the
+    // F11 shortcut or the boot-time transition on the same HWND.
+    final applied = await FullscreenController.instance.toggleFullScreen();
+    final fs = FullscreenController.instance.isFullscreen;
     _mpv.setProperty('user-data/zerk/fullscreen', fs ? 'yes' : 'no');
+    if (!applied) debugPrint('[mpv] fullscreen toggle did not settle as requested');
     await VideoHost.focus();
   }
 

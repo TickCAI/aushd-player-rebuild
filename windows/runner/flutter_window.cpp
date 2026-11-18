@@ -33,7 +33,8 @@ bool FlutterWindow::OnCreate() {
       FlutterDesktopRegistrarGetTextureRegistrar(
           flutter_controller_->engine()->GetRegistrarForPlugin("ZerkTrailerTextures")));
 
-  flutter_controller_->engine()->SetNextFrameCallback([&]() {
+  flutter_controller_->engine()->SetNextFrameCallback([this]() {
+    if (detached_) return;
     this->Show();
   });
 
@@ -43,6 +44,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  detached_ = true;
   video_host_ = nullptr;
   native_window_ = nullptr;
   trailer_textures_ = nullptr;
@@ -68,9 +70,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
 
   switch (message) {
     case WM_FONTCHANGE:
-      flutter_controller_->engine()->ReloadSystemFonts();
+      // This arrives with no window lifetime guarantee; the handler is guarded
+      // like the one above because after OnDestroy the controller is gone.
+      if (flutter_controller_ && flutter_controller_->engine()) {
+        flutter_controller_->engine()->ReloadSystemFonts();
+      }
       break;
     case WM_SIZE:
+      // The video host is a real child window, so Windows will not resize it for
+      // us. The request is coalesced inside the host: one toggle produces one
+      // resize instead of one per WM_SIZE round.
       if (video_host_) video_host_->OnParentResized();
       break;
     case WM_ACTIVATE:

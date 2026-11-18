@@ -5,6 +5,8 @@
 
 #include "resource.h"
 
+#include "window_metrics.h"
+
 namespace {
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -172,21 +174,31 @@ Win32Window::MessageHandler(HWND hwnd,
       LONG newHeight = newRectSize->bottom - newRectSize->top;
 
       SetWindowPos(hwnd, nullptr, newRectSize->left, newRectSize->top, newWidth,
-                   newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+                   newHeight, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 
       return 0;
     }
     case WM_SIZE: {
-      RECT rect = GetClientArea();
-      if (child_content_ != nullptr) {
-        MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
-                   rect.bottom - rect.top, TRUE);
+      window_metrics::wm_size_count++;
+      if (wparam == SIZE_MINIMIZED) {
+        // Minimizing asks for a 0x0 client area. Resizing the Flutter view and
+        // the video host to 0x0 makes DXGI/ANGLE deal with a zero-sized surface,
+        // which is not a layout the renderers are meant to see.
+        window_metrics::minimized_resize_count++;
+        return 0;
+      }
+      if (child_content_ != nullptr && IsWindow(child_content_)) {
+        RECT rect = {};
+        if (GetClientRect(hwnd, &rect) && rect.right > rect.left && rect.bottom > rect.top) {
+          MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
+                     rect.bottom - rect.top, TRUE);
+        }
       }
       return 0;
     }
 
     case WM_ACTIVATE:
-      if (child_content_ != nullptr) {
+      if (child_content_ != nullptr && IsWindow(child_content_)) {
         SetFocus(child_content_);
       }
       return 0;
@@ -196,13 +208,15 @@ Win32Window::MessageHandler(HWND hwnd,
       return 0;
   }
 
-  return DefWindowProc(window_handle_, message, wparam, lparam);
+  return DefWindowProc(hwnd, message, wparam, lparam);
 }
 
 void Win32Window::Destroy() {
+  if (destroyed_) return;
+  destroyed_ = true;
   OnDestroy();
 
-  if (window_handle_) {
+  if (window_handle_ && IsWindow(window_handle_)) {
     DestroyWindow(window_handle_);
     window_handle_ = nullptr;
   }
@@ -221,15 +235,19 @@ void Win32Window::SetChildContent(HWND content) {
   SetParent(content, window_handle_);
   RECT frame = GetClientArea();
 
-  MoveWindow(content, frame.left, frame.top, frame.right - frame.left,
-             frame.bottom - frame.top, true);
+  if (frame.right > frame.left && frame.bottom > frame.top) {
+    MoveWindow(content, frame.left, frame.top, frame.right - frame.left,
+               frame.bottom - frame.top, true);
+  }
 
   SetFocus(child_content_);
 }
 
 RECT Win32Window::GetClientArea() {
-  RECT frame;
-  GetClientRect(window_handle_, &frame);
+  RECT frame = {};
+  if (window_handle_ && IsWindow(window_handle_)) {
+    GetClientRect(window_handle_, &frame);
+  }
   return frame;
 }
 
