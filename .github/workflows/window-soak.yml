@@ -22,7 +22,7 @@ on:
       - 'ci/**'
       - 'soak/**'
     paths:
-      - 'lib/dev/window_soak.dart'
+      - 'lib/window_soak.dart'
       - 'lib/main.dart'
       - 'lib/core/windows/**'
       - 'windows/**'
@@ -65,9 +65,14 @@ jobs:
 
       # Errors only: the legacy tree carries deprecation noise that must not
       # block, but a type error in the soak harness has to stop the run.
+      # The lib listing is deliberate: analyze twice reported the harness as a
+      # non-existent URI while a tree probe proved the blob was checked out, so
+      # every run now records what the analyzer was actually looking at.
       - name: Static analysis
         shell: bash
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: |
+          echo "lib/: $(ls -1 lib | tr '\n' ' ')"
+          flutter analyze --no-fatal-infos --no-fatal-warnings
 
       # libmpv is not installed on purpose: the soak never opens media, and
       # windows/CMakeLists.txt only warns when windows/libs is empty. That keeps

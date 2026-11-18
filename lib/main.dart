@@ -17,7 +17,7 @@ import 'playback/player_settings.dart';
 import 'playback/player_smoke.dart';
 import 'playback/render_guard.dart';
 import 'core/windows/native_window.dart';
-import 'dev/window_soak.dart';
+import 'window_soak.dart';
 import 'l10n/l10n.dart';
 import 'ui/core/gamepad.dart';
 import 'ui/core/input_mode.dart';
