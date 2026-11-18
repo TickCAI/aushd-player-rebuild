@@ -36,6 +36,7 @@ abstract final class RenderGuard {
 
   static Timer? _clearTimer;
   static String? _avoid;
+  static String? _lastMode;
   static int _clean = 0;
 
   /// The mode fingerprint to steer around for this launch, when the previous
@@ -116,11 +117,28 @@ abstract final class RenderGuard {
   static Future<void> markPlaybackStarted({required String mode}) async {
     _clearTimer?.cancel();
     _clearTimer = null;
+    _lastMode = mode;
     try {
       await _write(await SharedPreferences.getInstance(), ending: true, mode: mode);
       debugPrint('[render-guard] session marked with $mode');
     } catch (e) {
       debugPrint('[render-guard] could not persist the playback marker: $e');
+    }
+  }
+
+  /// A launch failed before playback began: a GPU context mpv could not
+  /// initialize, a missing ICD, a video host that never answered. That is a
+  /// real answer about this render path, so remember it instead of stepping the
+  /// user's settings down a ladder and leaving them there.
+  static Future<void> noteLaunchFailure() async {
+    final mode = _lastMode;
+    if (mode == null) return;
+    _avoid = mode;
+    debugPrint('[render-guard] the launch failed on $mode; avoiding it next time');
+    try {
+      await _write(await SharedPreferences.getInstance(), ending: true, mode: mode);
+    } catch (e) {
+      debugPrint('[render-guard] could not record the failed mode: $e');
     }
   }
 
