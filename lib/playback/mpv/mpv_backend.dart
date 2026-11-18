@@ -60,6 +60,20 @@ final class MpvBackend implements PlayerBackend {
 
   bool _framed = false;
 
+  /// Set once [open] has run; nothing may talk to a player that never existed.
+  /// Guards every public method that would touch a torn-down player.
+  bool _closed = false;
+
+  /// `close()` must be idempotent: the ESC path, the room path and the
+  /// crash-recovery path can all reach it within the same frame.
+  bool _closing = false;
+
+  /// Time the video host is given to stop presenting before it is hidden.
+  /// Two frames at 120 Hz is 17 ms, so 150 ms is generous at any refresh rate -
+  /// the point is that the VO has stopped touching the swapchain before it is
+  /// hidden and later destroyed.
+  static const _quiesceDwell = Duration(milliseconds: 150);
+
   @override
   ValueListenable<PlayerState> get state => _state;
 
@@ -233,6 +247,9 @@ final class MpvBackend implements PlayerBackend {
       };
 
   Future<void> _showVideo(bool show) async {
+    // A late OSD phase change must not re-show a video host that the teardown
+    // has already hidden - that is a swapchain rebuild on the way out.
+    if (_closed) return;
     if (show == _videoShown) return;
     _videoShown = show;
     debugPrint('[mpv] video window ${show ? 'shown' : 'hidden'}');
@@ -259,6 +276,9 @@ final class MpvBackend implements PlayerBackend {
 
   @override
   void osd(String command, Object? data) {
+    // `_curtain` is disposed at the end of close(); notifying it afterwards
+    // throws into the synchronous event stream and used to break the pump.
+    if (_closed) return;
     if (command == 'trickplay') return _setTrickplay(data is Trickplay ? data : null);
     if (command == 'toast' && data is Map) return unawaited(_sendPictureToast(data));
     final payload = data is String ? data : jsonEncode(data);
@@ -296,24 +316,79 @@ final class MpvBackend implements PlayerBackend {
 
   @override
   Future<void> close() async {
+    if (_closing) {
+      debugPrint('[mpv] close() re-entered; ignoring');
+      return;
+    }
+    _closing = true;
+    AppLog.write('[session] close start (vo-configured=${_mpv.getString('vo-configured')})');
+
+    // 1. Stop reacting to the events this teardown is about to cause, and stop
+    //    feeding input into a command queue that is going away. Doing this
+    //    first also means a late OSD callback cannot resurrect the player.
+    await _sub?.cancel();
+    _mpv.state.removeListener(_onState);
+    VideoHost.onInput = null;
+    Gamepad.playerSink = null;
+
+    // 2. Stop decoding and presenting while mpv is still healthy, and give the
+    //    VO a moment to drop its frame. `keep-open` can hold the VO open, so a
+    //    timeout here is expected, not a failure - it is recorded either way.
+    _mpv.command(['stop']);
+    final quiesced =
+        await _waitVoConfigured(false, const Duration(milliseconds: 250));
+    AppLog.write('[vo] quiesced vo-configured=false '
+        '(${quiesced ? 'reached' : 'kept open by keep-open'})');
+    await Future<void>.delayed(_quiesceDwell);
+
+    // 3. Hide the host before the VO is destroyed, so the child window is not
+    //    resized or painted while it is going away.
+    await VideoHost.hide();
+    AppLog.write('[video_host] hidden');
+    if (Host.isLinux) await VideoHost.detach();
+    await Future<void>.delayed(_quiesceDwell);
+
+    // 4. Let mpv tear its own renderer down and say so, then destroy the handle.
+    //    `terminateDestroy` on a live VO joins threads while the driver is still
+    //    using the device - that is the window the crash dumps landed in.
+    AppLog.write('[mpv] quit sent');
+    final clean = await _mpv.shutdown();
+    AppLog.write('[mpv] shutdown event ${clean ? 'received' : 'TIMEOUT'}');
+    _mpv.dispose();
+    _closed = true;
+
+    // 5. Global display state is restored only after mpv is gone, never before:
+    //    a mode switch while the VO is still presenting forces a full swapchain
+    //    rebuild on the old device.
     if (_settings.keepRefreshRate) {
       _refresh.keep();
     } else {
       _refresh.restore();
     }
-    await _sub?.cancel();
-    _mpv.state.removeListener(_onState);
-    VideoHost.onInput = null;
-    Gamepad.playerSink = null;
-    await VideoHost.hide();
-    if (Host.isLinux) await VideoHost.detach();
-    _mpv.dispose();
+    AppLog.write('[refresh] restored');
+
     _resetTrickplay(null);
     final route = _route;
     _route = null;
     if (route != null && route.isActive) _navigator.removeRoute(route);
     _curtain.dispose();
     await _events.close();
+    AppLog.write('[session] close done');
+  }
+
+  /// Polls `vo-configured` until it matches [want].
+  ///
+  /// Returns whether the target state was actually observed within [timeout];
+  /// the caller logs the distinction instead of inventing a guarantee.
+  Future<bool> _waitVoConfigured(bool want, Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final value = _mpv.getString('vo-configured');
+      if (value == null) return false;
+      if ((value == 'yes') == want) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+    return false;
   }
 
   void _onEvent(MpvEvent e) {

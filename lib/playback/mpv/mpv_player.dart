@@ -243,6 +243,37 @@ final class MpvPlayer {
   void scriptMessage(String script, List<String> args) =>
       commandAsync(['script-message-to', script, ...args]);
 
+  /// Ask mpv to shut its own renderer down and wait for `MPV_EVENT_SHUTDOWN`.
+  ///
+  /// Calling [_terminateAndDestroy] straight away joins mpv's threads while the
+  /// VO still owns a GPU device and a swapchain - which is exactly the window in
+  /// which the driver faulted in two of the three dumps on record (70-90 ms
+  /// after `[v][vo/gpu/win32] uninit`). `quit` makes mpv tear the VO down on its
+  /// own thread and announce it, so the destroy that follows has nothing live
+  /// left to race with.
+  ///
+  /// Returns true when the shutdown event arrived, false when it timed out (the
+  /// caller still destroys the handle - leaking it would be worse).
+  Future<bool> shutdown({Duration timeout = const Duration(seconds: 3)}) {
+    if (_disposed) return Future.value(true);
+    final done = Completer<bool>();
+    final sub = _events.stream.listen((e) {
+      if (e is MpvShutdown && !done.isCompleted) done.complete(true);
+    });
+    command(['quit']);
+    return done.future.timeout(timeout, onTimeout: () {
+      debugPrint('[mpv] no shutdown event within ${timeout.inMilliseconds} ms');
+      return false;
+    }).whenComplete(sub.cancel);
+  }
+
+  /// Graceful counterpart of [dispose]: let mpv stop presenting, then destroy.
+  Future<void> disposeGracefully({Duration timeout = const Duration(seconds: 3)}) async {
+    if (_disposed) return;
+    await shutdown(timeout: timeout);
+    dispose();
+  }
+
   void dispose() {
     if (_disposed) return;
     _disposed = true;
@@ -290,31 +321,40 @@ final class MpvPlayer {
       final ev = _mpv.waitEvent(_handle, 0);
       final id = ev.ref.eventId;
       if (id == MpvEventId.none) break;
-      switch (id) {
-        case MpvEventId.propertyChange:
-          _onProperty(ev.ref.data.cast<MpvEventProperty>().ref);
-        case MpvEventId.fileLoaded:
-          _events.add(const MpvFileLoaded());
-        case MpvEventId.playbackRestart:
-          _events.add(const MpvPlaybackRestart());
-        case MpvEventId.endFile:
-          final end = ev.ref.data.cast<MpvEventEndFile>().ref;
-          _events.add(MpvEndFile(end.reason, end.error < 0 ? _err(end.error) : null));
-        case MpvEventId.clientMessage:
-          final msg = ev.ref.data.cast<MpvEventClientMessage>().ref;
-          _events.add(MpvClientMessage([
-            for (var i = 0; i < msg.numArgs; i++) (msg.args + i).value.toDartString(),
-          ]));
-        case MpvEventId.logMessage:
-          final log = ev.ref.data.cast<MpvEventLogMessage>().ref;
-          final text = log.text.toDartString().trimRight();
-          final prefix = log.prefix.toDartString();
-          final level = log.level.toDartString();
-          debugPrint('[mpv/$prefix] $level: $text');
-          _events.add(MpvLog(prefix, level, text));
-        case MpvEventId.shutdown:
-          _events.add(const MpvShutdown());
-          return;
+      // One throwing listener must not eat the rest of this batch. `_events` is
+      // a synchronous broadcast controller, so a re-entrant listener throwing
+      // used to abort the while loop: a dropped shutdown event would then hang
+      // the shutdown handshake, and a dropped end-file would freeze playback at
+      // the end of a file with no error anywhere.
+      try {
+        switch (id) {
+          case MpvEventId.propertyChange:
+            _onProperty(ev.ref.data.cast<MpvEventProperty>().ref);
+          case MpvEventId.fileLoaded:
+            _events.add(const MpvFileLoaded());
+          case MpvEventId.playbackRestart:
+            _events.add(const MpvPlaybackRestart());
+          case MpvEventId.endFile:
+            final end = ev.ref.data.cast<MpvEventEndFile>().ref;
+            _events.add(MpvEndFile(end.reason, end.error < 0 ? _err(end.error) : null));
+          case MpvEventId.clientMessage:
+            final msg = ev.ref.data.cast<MpvEventClientMessage>().ref;
+            _events.add(MpvClientMessage([
+              for (var i = 0; i < msg.numArgs; i++) (msg.args + i).value.toDartString(),
+            ]));
+          case MpvEventId.logMessage:
+            final log = ev.ref.data.cast<MpvEventLogMessage>().ref;
+            final text = log.text.toDartString().trimRight();
+            final prefix = log.prefix.toDartString();
+            final level = log.level.toDartString();
+            debugPrint('[mpv/$prefix] $level: $text');
+            _events.add(MpvLog(prefix, level, text));
+          case MpvEventId.shutdown:
+            _events.add(const MpvShutdown());
+            return;
+        }
+      } catch (e, s) {
+        debugPrint('[mpv] listener for event $id threw: $e\n$s');
       }
     }
   }

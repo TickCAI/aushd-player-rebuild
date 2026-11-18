@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../core/emby/emby_api_exception.dart';
 import '../core/emby/models/emby_item.dart';
+import '../core/log/app_log.dart';
 import '../core/windows/native_window.dart';
 import '../core/emby/models/media_source.dart';
 import '../l10n/app_localizations.dart';
@@ -934,6 +935,11 @@ final class PlaybackSession {
     if (_finishing) return;
     _finishing = true;
     debugPrint('[session] finishing (${reason.name}) at ${_player.state.value.position}');
+    // Anchors the ordered teardown sequence in the log. Anything that writes a
+    // player/HDR/refresh line *above* this one came from a path that ran before
+    // the session decided to finish - which is the shape of the bug this
+    // milestone is about.
+    AppLog.write('[session] finish (${reason.name})');
     _progressTimer?.cancel();
     _sync?.dispose(stopRoom: reason == PlaybackEndReason.userExit && !_closedByRoom);
     final cur = _current;
@@ -945,6 +951,7 @@ final class PlaybackSession {
     await _eventsSub?.cancel();
     _player.state.removeListener(_onState);
     await _player.close();
+    AppLog.write('[session] player closed');
     for (final pending in _trickplay.values) {
       unawaited(pending.then((trickplay) => trickplay?.dispose()));
     }
@@ -955,8 +962,13 @@ final class PlaybackSession {
         KeptDisplay.hdrOn = true;
       } else {
         debugPrint('[session] turning Windows HDR back off');
-        unawaited(NativeWindow.setHdr(false));
-        unawaited(DisplayGuard.clear());
+        // Awaited on purpose. This used to be fire-and-forget, so the global
+        // display mode flipped *after* the player had been destroyed and the
+        // two teardowns interleaved - and a mode change forces the GPU to
+        // rebuild surfaces that the driver was already tearing down.
+        final off = await NativeWindow.setHdr(false);
+        await DisplayGuard.clear();
+        AppLog.write('[hdr] restored off (${off ? 'ok' : 'failed'})');
       }
     }
 
