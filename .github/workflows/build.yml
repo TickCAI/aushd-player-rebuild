@@ -71,7 +71,10 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # Pinned: the three crashes on record were diagnosed against
+          # three different Flutter builds, which made same-code-different-binary
+          # one of the suspects. A floating stable channel keeps that ambiguity.
+          flutter-version: '3.50.0'
           cache: true
 
       - name: Resolve dependencies
@@ -111,7 +114,10 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # Pinned: the three crashes on record were diagnosed against
+          # three different Flutter builds, which made same-code-different-binary
+          # one of the suspects. A floating stable channel keeps that ambiguity.
+          flutter-version: '3.50.0'
           cache: true
 
       - name: Show toolchain
@@ -153,7 +159,7 @@ jobs:
             if curl -sf --retry 3 --retry-delay 2 \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest \
+              https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/tags/20261111 \
               > release.json && [ -s release.json ]; then
               break
             fi
@@ -161,7 +167,7 @@ jobs:
             sleep 3
           done
           url=$(python -c "import json,re; d=json.load(open('release.json')); print(next(a['browser_download_url'] for a in d['assets'] if re.match(r'mpv-dev-x86_64-\d', a['name'])))")
-          echo "libmpv source: $url"
+          echo "libmpv source: $url (pinned tag 20261111)"
           curl -sfL --retry 3 --retry-delay 2 -o mpv-dev.7z "$url"
           7z e -y -ompv-dev mpv-dev.7z '*.dll'
           mv mpv-dev/libmpv-2.dll windows/libs/libmpv-2.dll
