@@ -16,7 +16,7 @@ import 'playback/mpv/mpv_backend.dart';
 import 'playback/player_settings.dart';
 import 'playback/player_smoke.dart';
 import 'playback/render_guard.dart';
-import 'core/windows/native_window.dart';
+import 'core/windows/fullscreen_controller.dart';
 import 'window_soak.dart';
 import 'l10n/l10n.dart';
 import 'ui/core/gamepad.dart';
@@ -52,9 +52,12 @@ Future<void> main(List<String> args) async {
     return;
   }
   final services = await AppServices.create();
+  // Adopt whatever state the window is really in before anything else asks:
+  // the previous session may have left it fullscreen.
+  await FullscreenController.instance.sync();
   if (Host.isDesktop && services.settings.startFullScreen) {
     debugPrint('[app] starting in full screen');
-    await NativeWindow.setFullScreen(true);
+    await FullscreenController.instance.setFullScreen(true);
   }
   unawaited(UiSounds.load());
   Gamepad.start();
@@ -178,7 +181,8 @@ class _ZerkAppState extends State<ZerkApp> {
         child: TvScale(
           child: CallbackShortcuts(
             bindings: {
-              const SingleActivator(LogicalKeyboardKey.f11): () => unawaited(NativeWindow.toggleFullScreen()),
+              const SingleActivator(LogicalKeyboardKey.f11): () =>
+                  unawaited(FullscreenController.instance.toggleFullScreen()),
             },
             child: BackKeys(navigatorKey: _navigator, child: ZoneNavigation(child: child!)),
           ),

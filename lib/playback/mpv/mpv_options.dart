@@ -3,18 +3,21 @@ import '../dialogue_downmix.dart';
 import '../player_settings.dart';
 import '../subtitle_style.dart';
 
-Map<String, String> buildMpvOptions({
-  int? wid,
-  required PlayerSettings settings,
-  bool acceptInvalidCertificates = false,
-  String? logFile,
-  String? osdFontsDir,
-}) {
-  final downmix = settings.stereoDownmix;
-  final spdif = downmix ? '' : settings.mpvSpdif;
-  final bitstream = spdif.isNotEmpty;
-  final own = !settings.mpvConfOnly;
+/// The render path mpv will actually take, resolved once so that the options
+/// map and the "[session] mode" log line can never disagree about it.
+final class MpvMode {
+  const MpvMode({required this.vo, required this.api, required this.gpuContext});
+
+  final String vo;
+  final String api;
+  final String gpuContext;
+
+  String describe() => 'vo=$vo api=$api context=$gpuContext';
+}
+
+MpvMode resolveMpvMode({required PlayerSettings settings}) {
   final linux = Host.isLinux;
+  final own = !settings.mpvConfOnly;
   final api = settings.safeGpuApi;
   final vo = linux ? 'libmpv' : (own ? settings.videoOutput : 'gpu-next');
   // gpu-next only supports d3d11/vulkan on Windows. If the user picked OpenGL
@@ -30,6 +33,25 @@ Map<String, String> buildMpvOptions({
     'vulkan' => 'winvk',
     _ => 'win',
   };
+  return MpvMode(vo: effectiveVo, api: api, gpuContext: gpuContext);
+}
+
+Map<String, String> buildMpvOptions({
+  int? wid,
+  required PlayerSettings settings,
+  bool acceptInvalidCertificates = false,
+  String? logFile,
+  String? osdFontsDir,
+}) {
+  final downmix = settings.stereoDownmix;
+  final spdif = downmix ? '' : settings.mpvSpdif;
+  final bitstream = spdif.isNotEmpty;
+  final own = !settings.mpvConfOnly;
+  final linux = Host.isLinux;
+  final mode = resolveMpvMode(settings: settings);
+  final api = mode.api;
+  final gpuContext = mode.gpuContext;
+  final effectiveVo = mode.vo;
   final d3dDecode = settings.hwdec.startsWith('d3d11') ||
       settings.hwdec.startsWith('dxva2') ||
       settings.hwdec.startsWith('nvdec');
@@ -57,7 +79,11 @@ Map<String, String> buildMpvOptions({
     'osd-on-seek': 'no',
     'osd-level': '1',
     if (!linux) 'force-window': 'yes',
-    'msg-level': 'ffmpeg=error',
+    // The three crashes on record all happened inside the driver, and the only
+    // evidence that could ever name the failing call was in mpv's own vo/gpu
+    // log lines - which this used to switch off entirely with
+    // `msg-level: ffmpeg=error`. Keep ffmpeg quiet, keep the renderer loud.
+    'msg-level': 'all=info,vo=v,vd=v,ao=v,ffmpeg=warn',
     'keep-open': 'yes',
     'idle': 'yes',
 

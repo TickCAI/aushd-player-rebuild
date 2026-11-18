@@ -5,8 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:window_manager/window_manager.dart';
 
-import '../core/host.dart';
-import '../core/windows/native_window.dart';
+import 'core/host.dart';
+import 'core/windows/fullscreen_controller.dart';
+import 'core/windows/native_window.dart';
 
 /// Fullscreen window soak.
 ///
@@ -15,11 +16,19 @@ import '../core/windows/native_window.dart';
 /// fullscreen defects reproducible instead of "sometimes it crashes":
 ///
 ///  * `zerk/window` state must agree with the actual window geometry;
-///  * fullscreen must cover the windowed window, identically on every round;
-///  * the windowed geometry must come back exactly on the way out;
+///  * fullscreen must cover the monitor, with the frame styles gone, identically
+///    on every round;
+///  * the windowed geometry *and* the exact window style must come back on the
+///    way out;
+///  * one toggle must produce one resize, not a burst of them, because each
+///    resize rebuilds the mpv swapchain;
 ///  * concurrent toggles must not wedge the window layer;
 ///  * the last toggle must leave the app windowed (no leaked fullscreen state);
 ///  * the raster thread must keep producing frames during the transitions.
+///
+/// Transitions go through [FullscreenController], the product's single
+/// authority, so the soak grades the code that ships rather than a test-only
+/// path. `zerk/window` stays the oracle for what actually happened.
 ///
 /// `window_manager.isFullScreen()` is recorded as a diagnostic, never as an
 /// oracle: the app drives fullscreen through its own `zerk/window` channel plus
@@ -48,6 +57,10 @@ String _reportPath() {
   if (configured != null && configured.isNotEmpty) return configured;
   return '${File(Platform.resolvedExecutable).parent.path}${Platform.pathSeparator}soak-report.txt';
 }
+
+/// The frame pieces a borderless window must not have: WS_CAPTION (0x00C00000),
+/// WS_THICKFRAME (0x00040000), WS_SYSMENU (0x00080000) and both box styles.
+const int _kFrameStyles = 0x00CF0000;
 
 final class _Report {
   _Report(this.path) {
@@ -96,6 +109,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
   late final AnimationController _ticker;
   final _frames = <int>[];
   final _violations = <String>[];
+  final _fullscreen = FullscreenController.instance;
   bool _done = false;
 
   @override
@@ -133,6 +147,12 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
   bool _near(Rect a, Rect b, [double tol = 2]) =>
       (a.width - b.width).abs() <= tol && (a.height - b.height).abs() <= tol;
 
+  bool _covers(Rect window, Rect monitor, [double tol = 2]) =>
+      window.left <= monitor.left + tol &&
+      window.top <= monitor.top + tol &&
+      window.right >= monitor.right - tol &&
+      window.bottom >= monitor.bottom - tol;
+
   /// After a racy probe either rect may win, but a "fullscreen" claim backed by
   /// the baseline rect means the reported state and the window disagree.
   bool _coversAnything(Rect got, Rect? fsRef, Rect base) {
@@ -153,15 +173,23 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
       // Windowed geometry has to be provably smaller than the display, or the
       // "fullscreen covers windowed" invariant cannot hold on a small runner.
       // Start from a deliberately small window instead of trusting the default.
-      await NativeWindow.setFullScreen(false);
+      await _fullscreen.sync();
+      await _fullscreen.setFullScreen(false);
       await windowManager.setSize(const Size(640, 480));
       await _settle(360);
 
       _expect('baseline', !(await NativeWindow.isFullScreen()), 'zerk/window still reports fullscreen');
 
       final base = await windowManager.getBounds();
+      final baseDiag = await NativeWindow.diag();
+      final baseStyle = baseDiag?.style ?? 0;
+      final baseWindowRect = baseDiag?.windowRect ?? Rect.zero;
+      _expect('baseline', baseDiag != null, 'zerk/window diag unavailable');
+      _expect('baseline', baseStyle & _kFrameStyles != 0,
+          'windowed style 0x${baseStyle.toRadixString(16)} already has no frame');
       final pluginSays = await windowManager.isFullScreen();
-      report.line('[soak] baseline windowed bounds=${_fmt(base)}');
+      report.line('[soak] baseline windowed bounds=${_fmt(base)} '
+          'style=0x${baseStyle.toRadixString(16)} window=${_fmt(baseWindowRect)}');
       report.line('[soak] diagnostic window_manager.isFullScreen=$pluginSays '
           '(stale by design: the app bypasses the plugin, not a gate)');
 
@@ -185,16 +213,37 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
           'p99=${idleP99 ~/ 1000}ms worst=${idleSpans.isEmpty ? 0 : idleSpans.last ~/ 1000}ms');
 
       final framesBefore = _frames.length;
+      final transitionsBefore = _fullscreen.transitions;
+      final wmSizeBefore = baseDiag?.wmSize ?? 0;
       Rect? fsRef;
+      Rect? monitorRect;
       var driftCount = 0;
       var desyncCount = 0;
+      var styleLeakCount = 0;
 
       for (var i = 1; i <= widget.iterations; i++) {
-        await NativeWindow.setFullScreen(true);
+        final applied = await _fullscreen.setFullScreen(true);
         await _settle();
         final nativeFs = await NativeWindow.isFullScreen();
         final enterBounds = await windowManager.getBounds();
+        final enterDiag = await NativeWindow.diag();
+        _expect('i=$i enter', applied, 'controller reported the transition was not applied');
         _expect('i=$i enter', nativeFs, 'zerk/window isFullScreen=false');
+        if (enterDiag == null) {
+          _expect('i=$i enter', false, 'zerk/window diag unavailable');
+        } else {
+          monitorRect ??= enterDiag.monitorRect;
+          // The frame styles must be gone, and the window must actually cover the
+          // monitor. This is the assertion the missing SWP_FRAMECHANGED broke
+          // silently: the style changed but the client area kept the old size.
+          _expect('i=$i enter', enterDiag.style & _kFrameStyles == 0,
+              'fullscreen style 0x${enterDiag.style.toRadixString(16)} still has frame bits');
+          _expect('i=$i enter', _covers(enterDiag.windowRect, enterDiag.monitorRect),
+              'window ${_fmt(enterDiag.windowRect)} does not cover monitor '
+              '${_fmt(enterDiag.monitorRect)}');
+          _expect('i=$i enter', enterDiag.mismatch == 0,
+              'native recorded ${enterDiag.mismatch} fullscreen/monitor rect mismatches');
+        }
         _expect(
           'i=$i enter',
           enterBounds.width >= base.width - 2 && enterBounds.height >= base.height - 2,
@@ -202,7 +251,8 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
         );
         if (fsRef == null) {
           fsRef = enterBounds;
-          report.line('[soak] fullscreen rect=${_fmt(enterBounds)}');
+          report.line('[soak] fullscreen rect=${_fmt(enterBounds)} '
+              'style=0x${(enterDiag?.style ?? 0).toRadixString(16)}');
         } else if (!_near(enterBounds, fsRef)) {
           // A rect that changes between rounds is the delayed WM_NCCALCSIZE /
           // missing SWP_FRAMECHANGED signature: the first enter is still wrong
@@ -212,15 +262,15 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
         }
         if (!nativeFs) desyncCount++;
 
-        // Every 10th round hammers the entry points the way F11 + the startup
-        // path + the OSD key handler can: several toggles without waiting.
+        // Every 10th round hammers the same three entry points F11, the startup
+        // path and the OSD key handler use: several toggles without waiting.
         if (i % 10 == 0) {
           final beforeProbe = await NativeWindow.isFullScreen();
           try {
             await Future.wait([
-              NativeWindow.toggleFullScreen(),
-              NativeWindow.toggleFullScreen(),
-              NativeWindow.toggleFullScreen(),
+              _fullscreen.toggleFullScreen(),
+              _fullscreen.toggleFullScreen(),
+              _fullscreen.toggleFullScreen(),
             ]);
             await _settle(420);
             final afterProbe = await NativeWindow.isFullScreen();
@@ -244,19 +294,33 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
           } catch (e) {
             _expect('i=$i probe', false, 'concurrent toggle threw: $e');
           }
-          await NativeWindow.setFullScreen(false);
+          await _fullscreen.setFullScreen(false);
           await _settle();
         }
 
-        await NativeWindow.setFullScreen(false);
+        final exited = await _fullscreen.setFullScreen(false);
         await _settle();
         final nativeBack = await NativeWindow.isFullScreen();
         final exitBounds = await windowManager.getBounds();
+        final exitDiag = await NativeWindow.diag();
+        _expect('i=$i exit', exited, 'controller reported the exit was not applied');
         _expect('i=$i exit', !nativeBack, 'zerk/window isFullScreen=true');
         // Exact restore, not "not larger": a window that comes back smaller
         // every round is the placement-accumulation bug leaking state.
         _expect('i=$i exit', _near(exitBounds, base),
             'windowed ${_fmt(exitBounds)} != baseline ${_fmt(base)}');
+        if (exitDiag != null) {
+          // Style round trip must be bit-exact. A style that slowly loses bits is
+          // how the window ends up borderless in the library after playback.
+          if (exitDiag.style != baseStyle) {
+            styleLeakCount++;
+            _expect('i=$i exit', false,
+                'style 0x${exitDiag.style.toRadixString(16)} != baseline '
+                '0x${baseStyle.toRadixString(16)}');
+          }
+          _expect('i=$i exit', exitDiag.mismatch == 0,
+              'native recorded ${exitDiag.mismatch} fullscreen/monitor rect mismatches');
+        }
         if (nativeBack) desyncCount++;
 
         if (i % 5 == 0) {
@@ -267,16 +331,44 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
 
       // A leaked fullscreen state is the bug behind "exit to the library and
       // the window stays borderless", so it is a hard failure, not a warning.
-      await NativeWindow.setFullScreen(false);
+      await _fullscreen.setFullScreen(false);
       await _settle(420);
+      final finalDiag = await NativeWindow.diag();
       _expect('final', !(await NativeWindow.isFullScreen()), 'fullscreen state leaked after soak');
       _expect('final', fsRef != null, 'never observed a fullscreen rect');
+      _expect('final', _fullscreen.phase.value == FullscreenPhase.windowed,
+          'controller phase ${_fullscreen.phase.value} after the last exit');
+      _expect('final', _fullscreen.failures == 0,
+          'controller recorded ${_fullscreen.failures} transition failures');
+      _expect('final', _fullscreen.queued == 0, 'controller still had ${_fullscreen.queued} queued requests');
+      if (finalDiag != null) {
+        _expect('final', finalDiag.style == baseStyle,
+            'style 0x${finalDiag.style.toRadixString(16)} != baseline 0x${baseStyle.toRadixString(16)}');
+        _expect('final', finalDiag.setWindowPosFailures == 0,
+            'native recorded ${finalDiag.setWindowPosFailures} SetWindowPos failures');
+        final wmSizeTotal = finalDiag.wmSize - wmSizeBefore;
+        final transitions = _fullscreen.transitions - transitionsBefore;
+        report.line('[soak] window layer: wmSize=$wmSizeTotal transitions=$transitions '
+            'moves=${finalDiag.moveWindows} coalesced=${finalDiag.coalesced} '
+            'minimizedResize=${finalDiag.minimizedResize} mismatch=${finalDiag.mismatch}');
+        // Each transition is a style write plus a position change, so a handful of
+        // WM_SIZE rounds is expected; an order of magnitude more means something
+        // is re-entering the resize path recursively.
+        _expect('final', wmSizeTotal <= transitions * 6 + 6,
+            'wmSize=$wmSizeTotal for $transitions transitions (recursive resize)');
+        if (monitorRect != null) {
+          report.line('[soak] monitor rect=${_fmt(monitorRect)}');
+        }
+      }
 
       if (driftCount > 0) {
         report.line('[soak] fullscreen rect drifted on $driftCount/${widget.iterations} rounds');
       }
       if (desyncCount > 0) {
         report.line('[soak] state/geometry disagreed on $desyncCount/${widget.iterations} rounds');
+      }
+      if (styleLeakCount > 0) {
+        report.line('[soak] style leak on $styleLeakCount/${widget.iterations} rounds');
       }
 
       final newFrames = _frames.length - framesBefore;
@@ -294,7 +386,7 @@ class _SoakState extends State<_SoakApp> with SingleTickerProviderStateMixin {
           '${widget.iterations} fullscreen round trips');
       // Only p99 is gated: a single worst-frame spike is what the user sees as
       // jank, but on a GPU-less runner it is also the environment, so it stays
-      // reported with its real number. The budget is 3x this box's idle p99
+      // reported with its real number. The budget is 4x this box's idle median
       // with a 50ms floor, so a systematic transition stall still fails and a
       // slow runner does not.
       final budget = idleMedian * 4 > 50000 ? idleMedian * 4 : 50000;

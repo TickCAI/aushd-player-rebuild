@@ -32,6 +32,11 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<NativeWindow> native_window_;
 
   std::unique_ptr<TrailerTextures> trailer_textures_;
+
+  // The first-frame callback below outlives this object's lifetime window if the
+  // window is destroyed before the engine presents a frame; the flag is how that
+  // callback finds out instead of touching a half-torn-down controller.
+  bool detached_ = false;
 };
 
 #endif

@@ -6,11 +6,20 @@
 #include <vector>
 #include <windowsx.h>
 
+#include "window_metrics.h"
+
 namespace {
 
 constexpr wchar_t kClassName[] = L"ZERK_VIDEO_HOST";
 constexpr UINT_PTR kCursorTimer = 1;
 constexpr UINT kCursorHideMs = 1500;
+// One fullscreen toggle produces several WM_SIZE rounds (style change, then the
+// position change, then the deferred non-client recompute). Resizing the mpv VO
+// child on each one is what made a single toggle destroy and rebuild the
+// swapchain three or four times, so the work is folded into one resize that
+// runs after the storm settles.
+constexpr UINT_PTR kResizeTimer = 2;
+constexpr UINT kResizeCoalesceMs = 80;
 
 const char* SpecialKeyName(WPARAM vk) {
   switch (vk) {
@@ -93,7 +102,15 @@ VideoHost::VideoHost(HWND parent, HWND flutter_view, flutter::BinaryMessenger* m
 
 VideoHost::~VideoHost() {
   channel_->SetMethodCallHandler(nullptr);
-  if (hwnd_) DestroyWindow(hwnd_);
+  if (hwnd_ && IsWindow(hwnd_)) {
+    KillTimer(hwnd_, kCursorTimer);
+    KillTimer(hwnd_, kResizeTimer);
+    // Detach our user data first: the window is about to die and mpv's child
+    // window may still deliver messages while DestroyWindow tears it down.
+    SetWindowLongPtr(hwnd_, GWLP_USERDATA, 0);
+    DestroyWindow(hwnd_);
+    hwnd_ = nullptr;
+  }
 }
 
 void VideoHost::EnsureCreated() {
@@ -121,24 +138,74 @@ void VideoHost::EnsureCreated() {
 
 void VideoHost::Show() {
   EnsureCreated();
-  OnParentResized();
+  FlushResize();
   SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
   Focus();
 }
 
 void VideoHost::Hide() {
-  if (!hwnd_) return;
+  if (!hwnd_ || !IsWindow(hwnd_)) return;
   ShowWindow(hwnd_, SW_HIDE);
-  SetFocus(flutter_view_);
+  if (flutter_view_ && IsWindow(flutter_view_)) SetFocus(flutter_view_);
 }
 
 void VideoHost::OnParentResized() {
-  if (!hwnd_) return;
-  RECT rc;
-  GetClientRect(parent_, &rc);
-  MoveWindow(hwnd_, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
+  if (!hwnd_ || !IsWindow(hwnd_)) return;
+  if (resize_pending_) {
+    window_metrics::coalesced_resize_count++;
+    return;
+  }
+  resize_pending_ = true;
+  if (SetTimer(hwnd_, kResizeTimer, kResizeCoalesceMs, nullptr) == 0) {
+    // No timer means no coalescing; resizing once immediately is still better
+    // than leaving the child at a stale size.
+    FlushResize();
+  }
+}
+
+void VideoHost::FlushResize() {
+  if (!hwnd_ || !IsWindow(hwnd_)) return;
+  if (resize_pending_) {
+    KillTimer(hwnd_, kResizeTimer);
+    resize_pending_ = false;
+  }
+  if (!parent_ || !IsWindow(parent_)) return;
+  RECT rc = {};
+  if (!GetClientRect(parent_, &rc)) return;
+  const int width = rc.right - rc.left;
+  const int height = rc.bottom - rc.top;
+  if (width <= 0 || height <= 0) {
+    // Minimized or mid-transition: a zero-sized client rect is never a real
+    // layout target, and shrinking a DXGI swapchain to 0x0 is a documented way
+    // to get an invalid surface.
+    window_metrics::minimized_resize_count++;
+    return;
+  }
+  // Only touch a window whose size is actually wrong. Without this, our own
+  // MoveWindow call delivers a WM_SIZE back to this host, which schedules
+  // another resize, and the toggle never settles.
+  RECT host_rc = {};
+  const bool host_matches = GetClientRect(hwnd_, &host_rc) &&
+                            host_rc.right - host_rc.left == width &&
+                            host_rc.bottom - host_rc.top == height;
+  if (!host_matches) {
+    MoveWindow(hwnd_, 0, 0, width, height, FALSE);
+    window_metrics::move_window_count++;
+  }
+  // The child window belongs to mpv, in another process. Only touch it when it
+  // really exists, its size really differs, and never with a synchronous repaint
+  // (a repaint here forces the swapchain to present mid-transition).
   if (HWND child = GetWindow(hwnd_, GW_CHILD)) {
-    MoveWindow(child, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
+    if (IsWindow(child)) {
+      RECT child_rc = {};
+      const bool child_matches = GetClientRect(child, &child_rc) &&
+                                 child_rc.right - child_rc.left == width &&
+                                 child_rc.bottom - child_rc.top == height;
+      if (!child_matches) {
+        MoveWindow(child, 0, 0, width, height, FALSE);
+        window_metrics::move_window_count++;
+      }
+    }
   }
 }
 
@@ -259,6 +326,10 @@ LRESULT CALLBACK VideoHost::WndProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         KillTimer(hwnd, kCursorTimer);
         self->cursor_hidden_ = true;
         SetCursor(nullptr);
+        return 0;
+      }
+      if (wparam == kResizeTimer && self) {
+        self->FlushResize();
         return 0;
       }
       break;

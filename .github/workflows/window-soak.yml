@@ -49,7 +49,10 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # Pinned: the three crashes on record were diagnosed against
+          # three different Flutter builds, which made same-code-different-binary
+          # one of the suspects. A floating stable channel keeps that ambiguity.
+          flutter-version: '3.50.0'
           cache: true
 
       - name: Show toolchain
@@ -150,7 +153,10 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # Pinned: the three crashes on record were diagnosed against
+          # three different Flutter builds, which made same-code-different-binary
+          # one of the suspects. A floating stable channel keeps that ambiguity.
+          flutter-version: '3.50.0'
           cache: true
 
       - name: Resolve dependencies

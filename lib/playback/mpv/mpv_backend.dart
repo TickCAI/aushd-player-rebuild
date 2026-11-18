@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../core/host.dart';
 import '../../core/log/app_log.dart';
+import '../../core/windows/fullscreen_controller.dart';
 import '../../core/windows/native_window.dart';
 import '../../l10n/app_localizations.dart';
 import '../../ui/core/gamepad.dart';
@@ -74,6 +75,55 @@ final class MpvBackend implements PlayerBackend {
   @override
   String? get textSubtitleFormat => null;
 
+  /// Always-on mpv log, kept short.
+  ///
+  /// The three crashes on record happened inside `amdxx64.dll`, and the only
+  /// thread that could name the failing mpv call is mpv's own vo/gpu log - so
+  /// it must exist even when the user never turned on "detailed log". Volume is
+  /// bounded by keeping only the two most recent sessions on disk.
+  String? _mpvLogPath() {
+    final path = AppLog.sidePath('mpv');
+    if (path == null) return null;
+    try {
+      final dir = Directory(p.dirname(path));
+      if (!dir.existsSync()) return path;
+      final old = dir
+          .listSync()
+          .whereType<File>()
+          .where((f) => p.basename(f.path).startsWith('mpv-') && f.path.endsWith('.log'))
+          .toList()
+        ..sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+      for (final f in old.skip(2)) {
+        try {
+          f.deleteSync();
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return path;
+  }
+
+  /// One line per playback session describing the whole render stack.
+  ///
+  /// Without this, a dump can only be matched to "whatever the settings were at
+  /// the time" - and the settings were the thing that had silently changed
+  /// between the three crashes on record.
+  Future<void> _logSessionMode(String? logFile) async {
+    var hdr = 'unknown';
+    try {
+      final status = await NativeWindow.hdrStatus().timeout(const Duration(seconds: 2));
+      hdr = status.enabled ? 'on' : (status.supported ? 'off' : 'unsupported');
+    } catch (_) {}
+    final mode = resolveMpvMode(settings: _settings);
+    final displays = WidgetsBinding.instance.platformDispatcher.displays;
+    final display = displays.isEmpty ? null : displays.first;
+    AppLog.write('[session] mode ${mode.describe()} hwdec=${_settings.hwdec} '
+        'flip=${mode.api == 'd3d11' ? 'no' : 'n/a'} '
+        'fullscreen=${FullscreenController.instance.isFullscreen} hdr=$hdr '
+        'display=${display == null ? 'none' : '${display.size.width.round()}x${display.size.height.round()}'
+            '@${display.refreshRate.toStringAsFixed(2)}Hz scale=${display.devicePixelRatio}'} '
+        'mpvLog=${logFile == null ? 'off' : p.basename(logFile)}');
+  }
+
   @override
   Future<void> open() async {
     // A stuck native "create video host" call used to leave playItem awaiting
@@ -83,7 +133,7 @@ final class MpvBackend implements PlayerBackend {
         ? null
         : await VideoHost.create().timeout(const Duration(seconds: 8),
             onTimeout: () => throw StateError('the video host did not respond within 8 s'));
-    final logFile = _settings.detailedLog ? AppLog.sidePath('mpv') : null;
+    final logFile = _mpvLogPath();
     final options = buildMpvOptions(
       wid: wid,
       settings: _settings,
@@ -93,6 +143,7 @@ final class MpvBackend implements PlayerBackend {
     );
     debugPrint('[mpv] options: ${[for (final e in options.entries) if (e.key != 'wid') '${e.key}=${e.value}'].join(' ')}');
     if (logFile != null) debugPrint('[mpv] detailed log: $logFile');
+    unawaited(_logSessionMode(logFile));
     try {
       _mpv = MpvPlayer.create(options: options, logLevel: _settings.detailedLog ? 'info' : 'warn');
     } catch (e) {
@@ -549,8 +600,12 @@ final class MpvBackend implements PlayerBackend {
   }
 
   Future<void> _toggleFullscreen() async {
-    final fs = await NativeWindow.toggleFullScreen();
+    // Routed through the controller so an OSD-driven toggle cannot overlap the
+    // F11 shortcut or the boot-time transition on the same HWND.
+    final applied = await FullscreenController.instance.toggleFullScreen();
+    final fs = FullscreenController.instance.isFullscreen;
     _mpv.setProperty('user-data/zerk/fullscreen', fs ? 'yes' : 'no');
+    if (!applied) debugPrint('[mpv] fullscreen toggle did not settle as requested');
     await VideoHost.focus();
   }
 
