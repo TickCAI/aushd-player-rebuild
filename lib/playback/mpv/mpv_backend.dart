@@ -73,7 +73,15 @@ final class MpvBackend implements PlayerBackend {
   /// Two frames at 120 Hz is 17 ms, so 150 ms is generous at any refresh rate -
   /// the point is that the VO has stopped touching the swapchain before it is
   /// hidden and later destroyed.
-  static const _quiesceDwell = Duration(milliseconds: 150);
+  /// How long the VO is left alone after it has been stopped, before the next
+  /// step of the teardown touches its window.
+  ///
+  /// 150 ms was enough on paper (two frames at 120 Hz is 17 ms) and not enough
+  /// in practice: the 2026-11-18 dumps show AMD's user-mode worker faulting on a
+  /// null callback about five seconds *after* the player was already destroyed,
+  /// which is what a still-queued submission looks like once its object is gone.
+  /// The dwell covers the case where the queue is deeper than one frame.
+  static const _quiesceDwell = Duration(milliseconds: 400);
 
   @override
   ValueListenable<PlayerState> get state => _state;
@@ -352,6 +360,7 @@ final class MpvBackend implements PlayerBackend {
       return;
     }
     _closing = true;
+    final closeWatch = Stopwatch()..start();
     AppLog.write('[session] close start (vo-configured=${_mpv.getString('vo-configured')})');
 
     // 1. Stop reacting to the events this teardown is about to cause, and stop
@@ -365,9 +374,14 @@ final class MpvBackend implements PlayerBackend {
     // 2. Stop decoding and presenting while mpv is still healthy, and give the
     //    VO a moment to drop its frame. `keep-open` can hold the VO open, so a
     //    timeout here is expected, not a failure - it is recorded either way.
+    //    Pausing first means the driver stops receiving new frames *before* its
+    //    swapchain disappears under it, instead of draining a queue whose
+    //    objects are being freed at the same time.
+    _mpv.setProperty('pause', 'yes');
+    await Future<void>.delayed(const Duration(milliseconds: 250));
     _mpv.command(['stop']);
     final quiesced =
-        await _waitVoConfigured(false, const Duration(milliseconds: 250));
+        await _waitVoConfigured(false, const Duration(milliseconds: 600));
     AppLog.write('[vo] quiesced vo-configured=false '
         '(${quiesced ? 'reached' : 'kept open by keep-open'})');
     await Future<void>.delayed(_quiesceDwell);
@@ -386,6 +400,7 @@ final class MpvBackend implements PlayerBackend {
     final clean = await _mpv.shutdown();
     AppLog.write('[mpv] shutdown event ${clean ? 'received' : 'TIMEOUT'}');
     _mpv.dispose();
+    AppLog.write('[mpv] destroyed');
     _closed = true;
 
     // 5. Global display state is restored only after mpv is gone, never before:
@@ -404,7 +419,7 @@ final class MpvBackend implements PlayerBackend {
     if (route != null && route.isActive) _navigator.removeRoute(route);
     _curtain.dispose();
     await _events.close();
-    AppLog.write('[session] close done');
+    AppLog.write('[session] close done in ${closeWatch.elapsedMilliseconds} ms');
     // The marker is cleared after a grace period rather than now, so a fault
     // during the native teardown above is still attributed to this session.
     RenderGuard.markPlaybackFinished();
