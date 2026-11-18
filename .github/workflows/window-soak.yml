@@ -1,0 +1,200 @@
+name: Window soak
+
+# Reproduces the window/fullscreen defects in the cloud instead of on the
+# author's machine. There is no GPU on a hosted runner, so this job can never
+# reproduce the AMD driver crash -- what it does catch is everything in our own
+# code that puts the driver in that position: the double WM_SIZE resize, the
+# missing SIZE_MINIMIZED guard, the two disagreeing fullscreen authorities, the
+# leaked fullscreen state and the raster stalls during the transition.
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Fullscreen round trips (each = enter + exit)'
+        required: true
+        default: '40'
+      long_run:
+        description: 'Also run the 200 round-trip soak used for acceptance'
+        type: boolean
+        default: false
+  push:
+    branches:
+      - 'ci/**'
+      - 'soak/**'
+    paths:
+      - 'lib/window_soak.dart'
+      - 'lib/main.dart'
+      - 'lib/core/windows/**'
+      - 'windows/**'
+      - '.github/workflows/window-soak.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: window-soak-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ITERATIONS: ${{ inputs.iterations || '40' }}
+
+jobs:
+  soak:
+    name: Fullscreen soak
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show toolchain
+        shell: bash
+        run: flutter --version
+
+      - name: Resolve dependencies
+        shell: bash
+        run: flutter pub get
+
+      - name: Generate localizations
+        shell: bash
+        run: flutter gen-l10n
+
+      # Errors only: the legacy tree carries deprecation noise that must not
+      # block, but a type error in the soak harness has to stop the run.
+      # The lib listing is deliberate: analyze twice reported the harness as a
+      # non-existent URI while a tree probe proved the blob was checked out, so
+      # every run now records what the analyzer was actually looking at.
+      - name: Static analysis
+        shell: bash
+        run: |
+          echo "lib/: $(ls -1 lib | tr '\n' ' ')"
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      # libmpv is not installed on purpose: the soak never opens media, and
+      # windows/CMakeLists.txt only warns when windows/libs is empty. That keeps
+      # the job focused on the window layer and removes the unpinned download.
+      - name: Build Windows release
+        shell: bash
+        run: |
+          flutter build windows --release \
+            --build-name=0.0.0-soak --build-number=1 \
+            --dart-define=AUSHD_DIST_URL= \
+            --dart-define=AUSHD_HUB_URL= \
+            --dart-define=AUSHD_CHANNEL=soak
+
+      - name: Run fullscreen soak
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem build\windows -Recurse -Filter zerk_play.exe |
+            Where-Object { Test-Path (Join-Path $_.DirectoryName 'data') } |
+            Select-Object -First 1
+          if (-not $exe) { throw 'zerk_play.exe with a data bundle was not produced' }
+          Write-Host "soak target: $($exe.FullName)"
+
+          $env:AUSHD_WINDOW_SOAK = "$env:ITERATIONS"
+          $env:AUSHD_SOAK_REPORT = Join-Path $PWD 'soak-report.txt'
+          Write-Host "iterations: $($env:AUSHD_WINDOW_SOAK)"
+
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+          $exited = $p | Wait-Process -Timeout 900 -ErrorAction SilentlyContinue
+          if (-not $p.HasExited) {
+            Write-Host '::error::soak did not terminate within 900s'
+            try { $p.Kill() } catch {}
+          }
+          $code = if ($p.HasExited) { $p.ExitCode } else { -1 }
+          Write-Host "soak exit code: $code"
+
+          if (Test-Path $env:AUSHD_SOAK_REPORT) {
+            Write-Host '---- soak report ----'
+            Get-Content $env:AUSHD_SOAK_REPORT | ForEach-Object { Write-Host $_ }
+            Write-Host '---- end report ----'
+          } else {
+            Write-Host '::warning::no soak report was written'
+          }
+
+          # A dead process leaves no Dart exception: surface the faulting module
+          # from the Windows event log so the run is attributable.
+          if ($code -ne 0) {
+            Write-Host '---- application error events ----'
+            try {
+              Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001} -MaxEvents 5 |
+                ForEach-Object { Write-Host $_.Message }
+            } catch { Write-Host 'no application error events' }
+            throw "fullscreen soak failed with exit code $code"
+          }
+          Remove-Item Env:\AUSHD_WINDOW_SOAK -ErrorAction SilentlyContinue
+          Write-Host 'fullscreen soak passed'
+
+      - name: Upload soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report
+          path: soak-report.txt
+          if-no-files-found: warn
+
+  soak-long:
+    name: Fullscreen soak (200 round trips)
+    if: inputs.long_run
+    needs: soak
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Resolve dependencies
+        shell: bash
+        run: flutter pub get
+
+      - name: Generate localizations
+        shell: bash
+        run: flutter gen-l10n
+
+      - name: Build Windows release
+        shell: bash
+        run: |
+          flutter build windows --release \
+            --build-name=0.0.0-soak --build-number=1 \
+            --dart-define=AUSHD_DIST_URL= \
+            --dart-define=AUSHD_HUB_URL= \
+            --dart-define=AUSHD_CHANNEL=soak
+
+      - name: Run 200 round-trip soak
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem build\windows -Recurse -Filter zerk_play.exe |
+            Where-Object { Test-Path (Join-Path $_.DirectoryName 'data') } |
+            Select-Object -First 1
+          if (-not $exe) { throw 'zerk_play.exe with a data bundle was not produced' }
+
+          $env:AUSHD_WINDOW_SOAK = '200'
+          $env:AUSHD_SOAK_REPORT = Join-Path $PWD 'soak-report-long.txt'
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+          $p | Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
+          if (-not $p.HasExited) {
+            Write-Host '::error::long soak did not terminate within 1800s'
+            try { $p.Kill() } catch {}
+          }
+          $code = if ($p.HasExited) { $p.ExitCode } else { -1 }
+          Write-Host "long soak exit code: $code"
+          if (Test-Path $env:AUSHD_SOAK_REPORT) { Get-Content $env:AUSHD_SOAK_REPORT | Write-Host }
+          if ($code -ne 0) { throw "long soak failed with exit code $code" }
+
+      - name: Upload long soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report-long
+          path: soak-report-long.txt
+          if-no-files-found: warn

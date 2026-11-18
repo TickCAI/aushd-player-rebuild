@@ -17,6 +17,7 @@ import 'playback/player_settings.dart';
 import 'playback/player_smoke.dart';
 import 'playback/render_guard.dart';
 import 'core/windows/native_window.dart';
+import 'window_soak.dart';
 import 'l10n/l10n.dart';
 import 'ui/core/gamepad.dart';
 import 'ui/core/input_mode.dart';
@@ -42,6 +43,14 @@ Future<void> main(List<String> args) async {
   if (Host.isWindows) await RenderGuard.recoverOnStartup();
   WidgetsBinding.instance.addPostFrameCallback((_) => AppLog.mark('first frame'));
   if (Host.isWindows) await _initWindow();
+  // Window/fullscreen soak (CI gate). Runs before services so it needs no
+  // network, no auth and no media: the window layer is the only subject.
+  final soak = soakIterations();
+  if (soak > 0) {
+    debugPrint('[app] window soak mode iterations=$soak');
+    runApp(buildWindowSoakApp(soak));
+    return;
+  }
   final services = await AppServices.create();
   if (Host.isDesktop && services.settings.startFullScreen) {
     debugPrint('[app] starting in full screen');
