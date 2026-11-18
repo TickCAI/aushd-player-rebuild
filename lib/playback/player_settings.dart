@@ -134,7 +134,7 @@ final class PlayerSettings {
 
   /// A corrupted/old preference must never be handed to mpv verbatim: an
   /// unknown `gpu-api` fails mpv_initialize before the player page appears.
-  String get safeGpuApi => gpuApis.contains(gpuApi) ? gpuApi : 'vulkan';
+  String get safeGpuApi => gpuApis.contains(gpuApi) ? gpuApi : 'd3d11';
 
   final bool detailedLog;
 

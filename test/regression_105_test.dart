@@ -18,11 +18,11 @@ void main() {
   });
 
   test('a corrupt gpuApi preference can never reach mpv_initialize', () {
-    // A bad value must fall back to the safe default, which is Vulkan since
-    // the D3D11 path can crash the AMD driver on a swapchain transition.
-    expect(PlayerSettings.fromJson(const {'gpuApi': 'made-up'}).gpuApi, 'vulkan');
-    expect(PlayerSettings.fromJson(const {'gpuApi': 42}).gpuApi, 'vulkan');
-    expect(const PlayerSettings(gpuApi: 'made-up').safeGpuApi, 'vulkan');
+    // A bad value must fall back to the safe default, which is the d3d11 path
+    // with no dump against it: Vulkan runs through the same amdxx64 driver.
+    expect(PlayerSettings.fromJson(const {'gpuApi': 'made-up'}).gpuApi, 'd3d11');
+    expect(PlayerSettings.fromJson(const {'gpuApi': 42}).gpuApi, 'd3d11');
+    expect(const PlayerSettings(gpuApi: 'made-up').safeGpuApi, 'd3d11');
     expect(const PlayerSettings(gpuApi: 'vulkan').safeGpuApi, 'vulkan');
   });
 
@@ -31,7 +31,7 @@ void main() {
     expect(opengl['gpu-api'], 'opengl');
     expect(opengl['vo'], 'gpu');
 
-    final vulkan = buildMpvOptions(settings: const PlayerSettings(gpuApi: 'vulkan', hwdec: 'dxva2-copy'));
+    final vulkan = buildMpvOptions(settings: const PlayerSettings(gpuApi: 'vulkan', videoOutput: 'gpu-next', hwdec: 'dxva2-copy'));
     expect(vulkan['gpu-api'], 'vulkan');
     expect(vulkan['vo'], 'gpu-next');
     expect(vulkan['hwdec'], 'auto-safe');
