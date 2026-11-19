@@ -10,24 +10,25 @@ import 'kept_display.dart';
 final class DisplayRefreshMatcher {
   static String? _device;
 
-  /// Display mode switching is off in this build.
+  /// Display mode switching is available again, but nothing reaches it unless
+  /// the user turns it on: `PlayerSettings.matchRefreshRate` defaults to false
+  /// and `playback_session.dart` is the only caller.
   ///
-  /// Real-machine dumps from 2026-11-18 (five of them, one per attempt) show the
-  /// process dying on all three render backends - d3d11, vulkan and opengl - so
-  /// the backend was never the variable. What all five sessions had in common is
-  /// a mode change: `ChangeDisplaySettingsEx` to 75 Hz when the file loaded, and
-  /// back to 120 Hz on the way out (`[display] restoring the desktop refresh
-  /// rate`, 24 s after the player was already gone). The crash five seconds
-  /// later landed inside `flutter_windows.dll`, i.e. in ANGLE's surface, not in
-  /// mpv's.
+  /// It was hard-disabled while the 2026-11-18 crashes were being isolated: five
+  /// dumps, one per attempt, dying on all three render backends - d3d11, vulkan
+  /// and opengl - so the backend was never the variable. What all five sessions
+  /// had in common was a mode change: `ChangeDisplaySettingsEx` to 75 Hz when the
+  /// file loaded, and back to 120 Hz on the way out (`[display] restoring the
+  /// desktop refresh rate`, 24 s after the player was already gone); the crash
+  /// five seconds later landed inside `flutter_windows.dll`, i.e. in ANGLE's
+  /// surface, not in mpv's. With the switch off, ten fullscreen round trips on a
+  /// 4K HDR10 clip passed, which is what identified the mode change as the thing
+  /// that invalidates every surface the driver is holding.
   ///
-  /// A mode change invalidates every surface the driver is holding, on a machine
-  /// with fifteen display outputs and a 200% DPI desktop. This switch exists to
-  /// make that a single variable: with it off, a crash means the surface
-  /// teardown itself is at fault (plan A2, mpv_render_context), and no crash
-  /// means the mode change was it. Either answer is worth more than another
-  /// backend guess.
-  static const bool modeSwitchingEnabled = false;
+  /// So it stays opt-in. The switch is kept as a kill switch rather than deleted
+  /// because a machine with fewer display outputs may be fine with it, and this
+  /// way the decision is one constant away instead of a revert.
+  static const bool modeSwitchingEnabled = true;
 
   double? matchFrameRate(double fps, {int? hwnd}) {
     if (!Platform.isWindows || fps < 10 || fps > 121) return null;
@@ -70,6 +71,9 @@ final class DisplayRefreshMatcher {
       current.ref
         ..dmDisplayFrequency = best
         ..dmFields = DM_DISPLAYFREQUENCY | DM_PELSWIDTH | DM_PELSHEIGHT;
+      debugPrint('[refresh] switching ${w}x$h from ${currentHz.toStringAsFixed(3)} Hz '
+          'to $best Hz for ${fps.toStringAsFixed(3)} fps - this is the path that '
+          'crashed on 2026-11-18; it stays off by default for that reason');
       final rc = ChangeDisplaySettingsEx(devName, current, NULL, CDS_FULLSCREEN, nullptr);
       if (rc != DISP_CHANGE_SUCCESSFUL) {
         debugPrint('[refresh] ChangeDisplaySettingsEx($best Hz) failed: $rc');
