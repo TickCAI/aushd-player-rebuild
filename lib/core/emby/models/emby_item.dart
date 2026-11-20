@@ -55,6 +55,7 @@ final class EmbyItem {
     this.criticRating,
     this.genres = const [],
     this.studios = const [],
+    this.productionLocations = const [],
     this.runTimeTicks,
     this.primaryImageTag,
     this.primaryImageAspectRatio,
@@ -120,6 +121,9 @@ final class EmbyItem {
   final double? criticRating;
   final List<String> genres;
   final List<String> studios;
+  /// Countries/regions of origin from Emby `ProductionLocations` — powers the
+  /// region facet (国产/日韩/欧美). Not part of `cardFields` before M1.5.
+  final List<String> productionLocations;
   final int? runTimeTicks;
 
   final String? primaryImageTag;
@@ -253,7 +257,7 @@ final class EmbyItem {
       productionYear: productionYear, premiereDate: premiereDate,
       endDate: endDate, status: status, officialRating: officialRating,
       communityRating: communityRating, criticRating: criticRating, genres: genres ?? this.genres,
-      studios: studios, runTimeTicks: runTimeTicks, primaryImageTag: primaryImageTag,
+      studios: studios, productionLocations: productionLocations, runTimeTicks: runTimeTicks, primaryImageTag: primaryImageTag,
       primaryImageAspectRatio: primaryImageAspectRatio, thumbImageTag: thumbImageTag,
       logoImageTag: logoImageTag, backdropImageTags: backdropImageTags,
       parentBackdropItemId: parentBackdropItemId, parentBackdropImageTags: parentBackdropImageTags,
@@ -320,6 +324,7 @@ final class EmbyItem {
       criticRating: _double(json['CriticRating']),
       genres: _strings(json['Genres']),
       studios: _strings(json['Studios']),
+      productionLocations: _strings(json['ProductionLocations']),
       runTimeTicks: _int(json['RunTimeTicks']),
       primaryImageTag: _str(imageTags['Primary']),
       primaryImageAspectRatio: _double(json['PrimaryImageAspectRatio']),

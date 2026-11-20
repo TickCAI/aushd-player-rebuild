@@ -33,6 +33,37 @@ abstract final class ContentZh {
   static String genres(Iterable<String> values, {String separator = ', '}) =>
       values.map(genre).join(separator);
 
+  /// Normalize an Emby `ProductionLocations` value to a single Chinese region
+  /// bucket used by the browse page's region facet. Unknown regions pass through
+  /// so nothing is silently dropped. English UI returns the raw value.
+  static String region(String raw) {
+    if (raw.isEmpty) return raw;
+    final key = raw.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+    if (!enabled) return raw;
+    return _regions[key] ?? raw;
+  }
+
+  static const _regions = <String, String>{
+    // Mainland China & special administrative regions
+    'china': '中国', 'mainland china': '中国', 'cn': '中国',
+    'hong kong': '中国香港', 'hongkong': '中国香港', 'hk': '中国香港',
+    'taiwan': '中国台湾', 'tw': '中国台湾',
+    // East Asia
+    'japan': '日本', 'jp': '日本', 'south korea': '韩国', 'korea': '韩国',
+    'republic of korea': '韩国', 'kr': '韩国',
+    // Europe / North America
+    'united states': '美国', 'usa': '美国', 'us': '美国', 'america': '美国',
+    'united kingdom': '英国', 'uk': '英国', 'great britain': '英国',
+    'france': '法国', 'germany': '德国', 'italy': '意大利', 'spain': '西班牙',
+    'canada': '加拿大',
+    // South / Southeast Asia
+    'india': '印度', 'thailand': '泰国', 'singapore': '新加坡',
+    'malaysia': '马来西亚', 'indonesia': '印尼', 'vietnam': '越南',
+    'philippines': '菲律宾',
+    // Oceania
+    'australia': '澳大利亚', 'new zealand': '新西兰',
+  };
+
   /// Turn "English", "Chinese (Simplified)", "eng", "zh-CN" into 英语 / 简体中文.
   static String language(String raw) {
     if (!enabled || raw.isEmpty) return raw;

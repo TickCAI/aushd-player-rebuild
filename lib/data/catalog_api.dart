@@ -17,6 +17,11 @@ final class LibraryArtworkRef {
   final String? tag;
 }
 
+/// Where [CatalogApi.libraryArtwork] resolved a library's cover from. Backdrop
+/// and featured stills are real 16:9 images; Primary/Thumb are auto-generated
+/// vertical poster collages that must be letterboxed.
+enum LibraryArtworkSource { none, backdrop, featured, thumb, primary }
+
 final class LibraryView {
   const LibraryView({
     required this.id,
@@ -65,6 +70,22 @@ final class LibraryView {
         featuredArtwork: featuredArtwork ?? this.featuredArtwork,
         overview: overview,
       );
+
+  /// Returns a copy with the server-picked featured still replaced (including
+  /// cleared to null). Used to drop a still already shown by an earlier tile
+  /// so two libraries never ship the exact same cover.
+  LibraryView withFeaturedArtwork(LibraryArtworkRef? ref) => LibraryView(
+        id: id,
+        name: name,
+        collectionType: collectionType,
+        imageTag: imageTag,
+        thumbImageTag: thumbImageTag,
+        logoImageTag: logoImageTag,
+        backdropImageTags: backdropImageTags,
+        itemCount: itemCount,
+        featuredArtwork: ref,
+        overview: overview,
+      );
 }
 
 final class ItemPage {
@@ -88,8 +109,8 @@ final class CatalogApi {
   String get _userId => _janus.session.userId;
 
   static const cardFields = 'PrimaryImageAspectRatio,ProductionYear,CommunityRating,OfficialRating,'
-      'RunTimeTicks,Overview,Genres,ParentId,SeriesId,SeasonId,ProviderIds,ChildCount,'
-      'RecursiveItemCount,Status,EndDate,PremiereDate';
+      'RunTimeTicks,Overview,Genres,Studios,ProductionLocations,ParentId,SeriesId,SeasonId,'
+      'ProviderIds,ChildCount,RecursiveItemCount,Status,EndDate,PremiereDate';
 
   static const detailFields = '$cardFields,Taglines,Studios,People,MediaSources,MediaStreams,Chapters,'
       'OriginalTitle,PartCount,LocationType';
@@ -182,6 +203,23 @@ final class CatalogApi {
     return fromViews > fromQuery ? fromViews : fromQuery;
   }
 
+  /// Which artwork source [libraryArtwork] picked for [v]. Kept separate so a
+  /// card can fill with real stills but letterbox Emby's generated collage.
+  static LibraryArtworkSource libraryArtworkSource(LibraryView v) {
+    if (v.backdropImageTags.isNotEmpty) return LibraryArtworkSource.backdrop;
+    if (v.featuredArtwork != null) return LibraryArtworkSource.featured;
+    if (v.thumbImageTag != null) return LibraryArtworkSource.thumb;
+    if (v.imageTag != null) return LibraryArtworkSource.primary;
+    return LibraryArtworkSource.none;
+  }
+
+  /// True when the only art available is Emby's auto-generated vertical poster
+  /// collage (Primary/Thumb), which must be letterboxed rather than cropped.
+  static bool libraryArtworkIsCollage(LibraryView v) {
+    final source = libraryArtworkSource(v);
+    return source == LibraryArtworkSource.primary || source == LibraryArtworkSource.thumb;
+  }
+
   /// Shared by the home shelf and the rail so both show the same artwork.
   Uri? libraryArtwork(LibraryView v, {int width = 960}) {
     if (v.backdropImageTags.isNotEmpty) {
@@ -192,6 +230,32 @@ final class CatalogApi {
     if (v.thumbImageTag != null) return image(v.id, ImageKind.thumb, tag: v.thumbImageTag, width: width);
     if (v.imageTag != null) return image(v.id, ImageKind.primary, tag: v.imageTag, width: width);
     return null;
+  }
+
+  /// The server's "featured" still is often the *same* item across several
+  /// libraries, so shelves end up with duplicate covers. Give each library a
+  /// distinct still by preferring its own backdrop, then dropping a featured
+  /// ref whose itemId was already used by an earlier tile. Pure function over
+  /// the list; no extra server requests.
+  static List<LibraryView> dedupeLibraryArtwork(List<LibraryView> views) {
+    final used = <String>{};
+    return [
+      for (final v in views)
+        () {
+          final source = libraryArtworkSource(v);
+          if (source == LibraryArtworkSource.featured) {
+            final ref = v.featuredArtwork!;
+            if (!used.add(ref.itemId)) {
+              // Already shown by another library — fall back to the library's
+              // own generated art (or nothing) instead of a duplicate cover.
+              return v.withFeaturedArtwork(null);
+            }
+          } else if (source == LibraryArtworkSource.backdrop) {
+            used.add(v.id);
+          }
+          return v;
+        }(),
+    ];
   }
 
   static String? _tag(Map raw, String kind) {
@@ -286,6 +350,8 @@ final class CatalogApi {
     bool recursive = true,
     List<String>? genres,
     List<int>? years,
+    List<String>? studios,
+    List<String>? productionLocations,
     String? filters,
     double? minCommunityRating,
     String? searchTerm,
@@ -317,6 +383,11 @@ final class CatalogApi {
       'Limit': '$limit',
       'Genres': genres?.join('|'),
       'Years': years?.join(','),
+      // Server-side facets. Jellyfin ignores unknown parameters, so a server
+      // that doesn't support these simply returns the unfiltered page and the
+      // caller can still filter locally from the returned fields.
+      'Studios': studios?.join('|'),
+      'ProductionLocations': productionLocations?.join('|'),
       'Filters': filters,
       'MinCommunityRating': minCommunityRating?.toString(),
       'SearchTerm': searchTerm,
