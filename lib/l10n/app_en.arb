@@ -1,5 +1,12 @@
 {
   "@@locale": "en",
+  "smartThisWeek": "New this week",
+  "smartClassics": "Highly rated classics",
+  "smartFresh": "Fresh releases",
+  "smartGems": "Hidden gems",
+  "smartOneEp": "One episode to hook you",
+  "smartPicks": "Picked for this week",
+  "smartMore": "More",
   "myLibraries": "My libraries",
   "gpuApi": "Graphics API",
   "gpuApiHint": "D3D11 is the default. If fullscreen playback crashes on AMD drivers, try Vulkan or OpenGL. Applies from the next playback.",
