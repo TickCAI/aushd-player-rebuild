@@ -47,6 +47,28 @@ enum _Sort {
 
 enum _Watched { all, unwatched, watched, favorites }
 
+/// Browse tabs mirroring the FlixPilot-style "streaming" page the user asked
+/// for. Sort is handled by the toolbar; a tab only changes the *selection
+/// rule*, so it stays orthogonal to the facet filters below.
+enum _BrowseTab {
+  featured,
+  topRated,
+  recent,
+  upcoming;
+
+  String label(L10n l10n) => switch (this) {
+        featured => l10n.filterAll,
+        topRated => l10n.topRatedMovies,
+        recent => l10n.sortRecentlyAdded,
+        upcoming => l10n.comingSoon,
+      };
+}
+
+/// The five facets the user approved. Values inside one facet combine with OR;
+/// different facets combine with AND. 类型 (genre) reuses the existing toolbar
+/// selector, so the extra facet buttons here cover 平台/年份/地区.
+enum _Facet { studio, year, region }
+
 class LibraryPage extends StatefulWidget {
   const LibraryPage({super.key, required this.kind, this.view, this.onViewChanged});
 
@@ -70,6 +92,15 @@ class _LibraryPageState extends State<LibraryPage> {
   String? _genre;
   List<String> _genres = const [];
 
+  /// M1.5 browse state. Facets collect distinct values from the current page;
+  /// the server also supports Studios/ProductionLocations filtering, so a
+  /// selection is sent to `query` and (as a fallback for servers that ignore
+  /// those params) applied locally to the returned page.
+  _BrowseTab _tab = _BrowseTab.featured;
+  final Set<String> _studios = {};
+  final Set<int> _years = {};
+  final Set<String> _regions = {};
+
   /// Real libraries reported by the Emby/Jellyfin server, not the app's
   /// hard-coded "Movies / Shows / Favorites" taxonomy.
   List<catalog.LibraryView> _views = const [];
@@ -84,6 +115,11 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   final _items = <EmbyItem>[];
+  /// Raw items consumed from the server. With a local facet fallback the
+  /// displayed list is shorter than what the server returned, so `start` must
+  /// advance by this count, not by `_items.length`, to avoid re-fetching an
+  /// overlapping page.
+  int _fetched = 0;
   int _total = -1;
   bool _loading = false;
   int _generation = 0;
@@ -100,6 +136,94 @@ class _LibraryPageState extends State<LibraryPage> {
       LibraryKind.shows => const ['Series'],
       LibraryKind.favorites => const ['Movie', 'Series'],
     };
+  }
+
+  /// Seerr is optional. The 即将上映 tab only makes sense when a request
+  /// service is configured (it reads Seerr's upcoming-movies feed elsewhere),
+  /// so a plain Emby install never sees a dead tab.
+  bool get _seerrConfigured => AppServicesScope.read(context).seerr != null;
+
+  List<_BrowseTab> get _tabs => [
+        _BrowseTab.featured,
+        _BrowseTab.topRated,
+        _BrowseTab.recent,
+        if (_seerrConfigured) _BrowseTab.upcoming,
+      ];
+
+  void _selectTab(_BrowseTab tab) {
+    if (tab == _tab) return;
+    setState(() {
+      _tab = tab;
+      _sort = switch (tab) {
+        _BrowseTab.topRated => _Sort.rating,
+        _BrowseTab.recent => _Sort.added,
+        _BrowseTab.featured || _BrowseTab.upcoming => _Sort.released,
+      };
+    });
+    _reload();
+  }
+
+  /// Distinct facet values seen so far, used to populate the pickers. Region
+  /// values are normalized to Chinese buckets through ContentZh.region.
+  Map<String, String> _studioOptions() => {
+        for (final s in _distinct(_items.expand((i) => i.studios))) s: s,
+      };
+  Map<int, String> _yearOptions() => {
+        for (final y in _distinct(_items.map((i) => i.premiereDate?.year))) y: '$y',
+      };
+  Map<String, String> _regionOptions() => {
+        for (final r in _distinct(_items.expand((i) => i.productionLocations.map(ContentZh.region)))) r: r,
+      };
+
+  Iterable<T> _distinct<T>(Iterable<T?> values) => values.whereType<T>().toSet();
+
+  /// Local fallback filter for facets a server may ignore, plus the 即将上映
+  /// tab's "premieres after today" rule. Empty facet selection means "no
+  /// constraint". Sending facet values to `query` too keeps the result set
+  /// small on servers that support them.
+  List<EmbyItem> _filterLocally(List<EmbyItem> source) {
+    final now = DateTime.now();
+    final facetsActive = _studios.isNotEmpty || _years.isNotEmpty || _regions.isNotEmpty;
+    final upcoming = _tab == _BrowseTab.upcoming;
+    if (!facetsActive && !upcoming) return source;
+    return source.where((item) {
+      if (upcoming) {
+        final date = item.premiereDate;
+        if (date == null || !date.isAfter(now)) return false;
+      }
+      if (_studios.isNotEmpty && !item.studios.any(_studios.contains)) return false;
+      if (_years.isNotEmpty) {
+        final y = item.premiereDate?.year;
+        if (y == null || !_years.contains(y)) return false;
+      }
+      if (_regions.isNotEmpty &&
+          !item.productionLocations.map(ContentZh.region).any(_regions.contains)) {
+        return false;
+      }
+      return true;
+    }).toList();
+  }
+
+  Future<void> _pickFacet<T>(_Facet facet, Map<T, String> options, Set<T> selected) async {
+    final picked = await showMultiSelectSidePanel<T>(
+      context,
+      title: switch (facet) {
+        _Facet.studio => '平台',
+        _Facet.year => '年份',
+        _Facet.region => '地区',
+      },
+      options: [
+        for (final e in options.entries)
+          PanelOption<T>(value: e.key, title: e.value, selected: selected.contains(e.key)),
+      ],
+    );
+    if (picked == null) return;
+    setState(() {
+      selected
+        ..clear()
+        ..addAll(picked);
+    });
+    _reload();
   }
 
   @override
@@ -168,6 +292,7 @@ class _LibraryPageState extends State<LibraryPage> {
   void _reload() {
     setState(() {
       _items.clear();
+      _fetched = 0;
       _total = -1;
       _generation++;
     });
@@ -176,7 +301,7 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Future<void> _loadMore() async {
-    if (_loading || (_total >= 0 && _items.length >= _total)) return;
+    if (_loading || (_total >= 0 && _fetched >= _total)) return;
     _loading = true;
     final generation = _generation;
     final settings = AppServicesScope.read(context).settings;
@@ -188,9 +313,11 @@ class _LibraryPageState extends State<LibraryPage> {
             types: _types,
             sortBy: _sort.field,
             descending: _sort.descending,
-            start: _items.length,
+            start: _fetched,
             limit: _pageSize,
             genres: _genre == null ? null : [_genre!],
+            studios: _studios.isEmpty ? null : _studios.toList(),
+            productionLocations: _regions.isEmpty ? null : _regions.toList(),
             filters: switch (_watched) {
               _Watched.all => null,
               _Watched.unwatched => 'IsUnplayed',
@@ -199,8 +326,10 @@ class _LibraryPageState extends State<LibraryPage> {
             },
           );
       if (!mounted || generation != _generation) return;
+      final filtered = _filterLocally(page.items);
       setState(() {
-        _items.addAll(page.items);
+        _items.addAll(filtered);
+        _fetched += page.items.length;
         _total = page.total;
       });
     } catch (e) {
@@ -460,6 +589,51 @@ class _LibraryPageState extends State<LibraryPage> {
                       ]),
                     ),
                   ]),
+                ),
+                // M1.5 browse tabs + facet filters. Kept in the same scroll
+                // view as the toolbar so headers never overlap the grid.
+                Padding(
+                  padding: const EdgeInsets.only(left: contentLeft, right: 120, bottom: 14),
+                  child: FocusZone(
+                    debugLabel: 'library-tabs',
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(children: [
+                        for (final tab in _tabs) ...[
+                          if (tab != _tabs.first) const SizedBox(width: 12),
+                          TvButton(label: tab.label(l10n), primary: _tab == tab, onSelect: () => _selectTab(tab)),
+                        ],
+                      ]),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: contentLeft, right: 120, bottom: 18),
+                  child: FocusZone(
+                    debugLabel: 'library-facets',
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(children: [
+                        TvButton(
+                          label: _studios.isEmpty ? '平台' : '平台·${_studios.length}',
+                          icon: Icons.business_rounded,
+                          onSelect: () => _pickFacet(_Facet.studio, _studioOptions(), _studios),
+                        ),
+                        const SizedBox(width: 12),
+                        TvButton(
+                          label: _years.isEmpty ? '年份' : '年份·${_years.length}',
+                          icon: Icons.calendar_today_rounded,
+                          onSelect: () => _pickFacet(_Facet.year, _yearOptions(), _years),
+                        ),
+                        const SizedBox(width: 12),
+                        TvButton(
+                          label: _regions.isEmpty ? '地区' : '地区·${_regions.length}',
+                          icon: Icons.public_rounded,
+                          onSelect: () => _pickFacet(_Facet.region, _regionOptions(), _regions),
+                        ),
+                      ]),
+                    ),
+                  ),
                 ),
                 if (_views.isNotEmpty)
                   Padding(

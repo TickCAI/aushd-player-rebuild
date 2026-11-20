@@ -266,7 +266,10 @@ class _HomePageState extends State<HomePage> {
   /// /Views call must never wipe out the whole home page or stall its loader.
   static Future<MixedItems> _libraryTiles(AppServices s) async {
     try {
-      return <Object>[for (final v in await s.catalog.viewsWithCounts()) if (v.name.isNotEmpty) v];
+      final views = await s.catalog.viewsWithCounts();
+      // Two libraries often resolve to the same server-picked featured still;
+      // drop the duplicate so the shelf doesn't repeat a cover.
+      return <Object>[for (final v in CatalogApi.dedupeLibraryArtwork(views)) if (v.name.isNotEmpty) v];
     } catch (e) {
       debugPrint('[home] library views: $e');
       return const <Object>[];
@@ -690,7 +693,7 @@ class _HomePageState extends State<HomePage> {
             height: areaH,
             gap: switch ((row.kind, row.style)) {
               (_Kind.collections, _) => 28,
-              (_Kind.libraries, _) => 24,
+              (_Kind.libraries, _) => Zs.cardGap,
               (_, CardStyle.ranked) => 8,
               (_, CardStyle.spotlight) => 30,
               _ => Zs.cardGap,

@@ -82,10 +82,41 @@ void main() {
     expect(LibraryCard.typeLabel('music', lookupL10n(const Locale('en'))), 'Music');
   });
 
-  test('library tiles are compact 16:9 tiles, larger than a landscape card', () {
+  test('library tiles match the continue-watching landscape card size', () {
+    // The old 560-wide tile towered over the 380-wide continue-watching row.
+    // Libraries must align to the same grid now.
+    expect(libraryCardWidth, closeTo(380.0, 0.001));
+    expect(libraryCardWidth * 9 / 16, closeTo(213.75, 0.001));
     expect(libraryCardWidth, lessThan(spotlightWidth));
-    expect(libraryCardWidth, greaterThan(380.0));
-    expect(libraryCardWidth * 9 / 16, closeTo(315.0, 0.001));
+  });
+
+  test('duplicate featured artwork is dropped but real backdrops stay', () {
+    const a = LibraryView(id: 'a', name: '电影', featuredArtwork: LibraryArtworkRef('item-1', ImageKind.backdrop, 't1'));
+    const b = LibraryView(id: 'b', name: '剧集', featuredArtwork: LibraryArtworkRef('item-1', ImageKind.backdrop, 't1'));
+    const c = LibraryView(id: 'c', name: '纪录片', backdropImageTags: ['own']);
+    final deduped = CatalogApi.dedupeLibraryArtwork([a, b, c]);
+    expect(deduped[0].featuredArtwork?.itemId, 'item-1');
+    expect(deduped[1].featuredArtwork, isNull); // duplicate still cleared
+    expect(deduped[2].backdropImageTags, const ['own']); // own art untouched
+  });
+
+  test('production locations parse and regions normalize to Chinese buckets', () {
+    ContentZh.uiLanguage = 'zh';
+    final item = EmbyItem.fromJson(const {
+      'Id': 'm-region',
+      'Name': '测试片',
+      'Type': 'Movie',
+      'ProductionLocations': ['Japan', 'China', 'United States'],
+      'Studios': ['A24'],
+    });
+    expect(item.productionLocations, const ['Japan', 'China', 'United States']);
+    expect(item.studios, const ['A24']);
+    expect(item.productionLocations.map(ContentZh.region).toList(),
+        const ['日本', '中国', '美国']);
+    // Unknown regions pass through instead of being dropped silently.
+    expect(ContentZh.region('Atlantis'), 'Atlantis');
+    // An empty ProductionLocations list is safe (no crash in the facet).
+    expect(EmbyItem.fromJson(const {'Id': 'x', 'Name': 'y', 'Type': 'Movie'}).productionLocations, isEmpty);
   });
 
   test('home collections keep Chinese names and drop Korean/English ones', () {
