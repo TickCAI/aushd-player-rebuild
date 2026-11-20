@@ -272,7 +272,7 @@ final class SmartListResolver {
           descending: spec.descending,
           filters: spec.filters,
           minCommunityRating: spec.minRating,
-          genres: spec.id == picks.id && genres.isNotEmpty ? genres : null,
+          genres: spec.id == SmartSpec.picks.id && genres.isNotEmpty ? genres : null,
           years: spec.years,
           // Scored shelves need People for the actor/director half of tasteMatch.
           fields: spec.score ? '${CatalogApi.cardFields},People' : CatalogApi.cardFields,
