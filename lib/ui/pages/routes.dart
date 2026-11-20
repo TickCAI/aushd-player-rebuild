@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 
 import '../../core/emby/models/emby_item.dart';
 import '../../data/seerr_api.dart';
+import '../../data/smart_list.dart';
 import '../core/navigation.dart';
 import 'collection_page.dart';
 import 'details_page.dart';
 import 'person_page.dart';
 import 'request_page.dart';
 import 'series_page.dart';
+import 'smart_list_page.dart';
 
 Route<void> detailsRoute(EmbyItem item) =>
     tvRoute(DetailsPage(itemId: item.id, initial: item), name: 'details:${item.id}');
@@ -38,4 +40,8 @@ void openRequest(BuildContext context, SeerrMedia media) {
 
 void openPerson(BuildContext context, Person person) {
   Navigator.of(context).push(tvRoute(PersonPage(person: person), name: 'person:${person.id}'));
+}
+
+void openSmartList(BuildContext context, SmartSpec spec) {
+  Navigator.of(context).push(tvRoute(SmartListPage(spec: spec), name: 'smart:${spec.id}'));
 }

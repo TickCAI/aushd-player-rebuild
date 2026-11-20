@@ -27,6 +27,7 @@ import '../pages/library_page.dart';
 import '../pages/live_tv_page.dart';
 import '../pages/my_list_page.dart';
 import '../pages/profile_page.dart';
+import '../pages/routes.dart' show openSmartList;
 import '../pages/search_page.dart';
 import '../pages/settings_page.dart';
 import '../pages/together_page.dart';
@@ -387,7 +388,10 @@ class _ShellState extends State<Shell> {
   }
 
   Widget _page(ShellTab t) => switch (t) {
-    ShellTab.home => HomePage(onOpenLibraryView: _selectLibraryView),
+    ShellTab.home => HomePage(
+        onOpenLibraryView: _selectLibraryView,
+        onOpenSmartList: (spec) => openSmartList(context, spec),
+      ),
     ShellTab.search => const SearchPage(),
     ShellTab.movies => LibraryPage(
         kind: LibraryKind.movies,

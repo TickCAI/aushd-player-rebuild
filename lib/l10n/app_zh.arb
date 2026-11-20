@@ -1,5 +1,12 @@
 {
   "@@locale": "zh",
+  "smartThisWeek": "本周更新",
+  "smartClassics": "高分经典",
+  "smartFresh": "新片速递",
+  "smartGems": "冷门佳作",
+  "smartOneEp": "一集入坑",
+  "smartPicks": "本周推荐",
+  "smartMore": "更多",
   "myLibraries": "我的媒体库",
   "gpuApi": "图形接口",
   "gpuApiHint": "默认 D3D11。若全屏播放闪退（常见于 AMD 驱动），可改用 Vulkan 或 OpenGL 绕开；切换后建议把硬件加速设为自动。从下一次播放开始生效。",

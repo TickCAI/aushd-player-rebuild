@@ -7,6 +7,7 @@ import '../../core/emby/models/emby_item.dart';
 import '../../data/catalog_api.dart';
 import '../../data/recommendations.dart';
 import '../../data/seerr_api.dart';
+import '../../data/smart_list.dart';
 import '../../data/taste_profile.dart';
 import '../../data/title_tags.dart';
 import '../../core/log/app_log.dart';
@@ -16,6 +17,7 @@ import '../core/artwork.dart';
 import '../core/input_mode.dart';
 import '../core/playback_launcher.dart';
 import '../focus/focus_zone.dart';
+import '../focus/tv_focusable.dart';
 import '../theme/tokens.dart';
 import '../widgets/backdrop.dart';
 import '../widgets/cards.dart';
@@ -40,7 +42,8 @@ enum _Kind {
 }
 
 class _Row {
-  _Row(this.title, this.load, {this.style = CardStyle.poster, this.kind = _Kind.cards, this.recommends = true});
+  _Row(this.title, this.load,
+      {this.style = CardStyle.poster, this.kind = _Kind.cards, this.recommends = true, this.smartSpec});
 
   String Function(L10n) title;
 
@@ -49,13 +52,20 @@ class _Row {
   final _Kind kind;
 
   final bool recommends;
+
+  /// Set for smart-shelf rows so the "More" affordance can open a filtered
+  /// library view for the same spec (§3.2).
+  final SmartSpec? smartSpec;
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.onOpenLibraryView});
+  const HomePage({super.key, this.onOpenLibraryView, this.onOpenSmartList});
 
   /// Called when a server-library tile on the home page is activated.
   final ValueChanged<LibraryView>? onOpenLibraryView;
+
+  /// Called when a smart-list row's "More" affordance is activated.
+  final ValueChanged<SmartSpec>? onOpenSmartList;
 
   static final firstLoad = ValueNotifier(true);
 
@@ -215,6 +225,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   void refresh() {
+    // Smart shelves cache for 30 min; a manual/library refresh must drop it so
+    // newly watched items and taste changes are reflected immediately.
+    SmartListResolver.invalidate();
     setState(() {
       _data.clear();
       _taste = null;
@@ -251,6 +264,18 @@ class _HomePageState extends State<HomePage> {
         debugPrint('[home] taste profile: $e');
         return const TasteProfile();
       });
+
+  /// Build a row backed by a declarative SmartSpec (§5). Every smart row is
+  /// non-recommending by default: these shelves already apply their own
+  /// taste/unplayed filters, so the global `keptInRecommendations` gate would
+  /// silently drop most of them.
+  _Row _smartRow(AppServices s, SmartSpec spec, String Function(L10n) title,
+      {CardStyle style = CardStyle.poster}) {
+    return _Row(title, () async {
+      final resolver = SmartListResolver(s.catalog, await _profile(s));
+      return resolver.resolve(spec);
+    }, style: style, recommends: false, smartSpec: spec);
+  }
 
   Future<List<TitleTag>> _tags(AppServices s) => _tasteTags ??= () async {
         final tags = s.titleTags;
@@ -291,54 +316,48 @@ class _HomePageState extends State<HomePage> {
     final r = s.recommender;
     Future<MixedItems> items(Future<ItemPage> page) async => (await page).items;
 
+    // Smart shelves (§3.1 B/C/F zones). Declarative specs live in
+    // `lib/data/smart_list.dart`; a shelf below its minItems is hidden by the
+    // resolver, so no empty rows are produced here.
+    final smart = <_Row>[
+      _smartRow(s, SmartSpec.thisWeek, (l) => l.smartThisWeek,
+          style: CardStyle.landscape),
+      _smartRow(s, SmartSpec.classics, (l) => l.smartClassics),
+      _smartRow(s, SmartSpec.fresh, (l) => l.smartFresh),
+      _smartRow(s, SmartSpec.gems, (l) => l.smartGems),
+      _smartRow(s, SmartSpec.oneEp, (l) => l.smartOneEp,
+          style: CardStyle.landscape),
+      _smartRow(s, SmartSpec.picks, (l) => l.smartPicks,
+          style: CardStyle.spotlight),
+    ];
+
+    // Six zones (§3.1), ≤12 rows, no duplicate titles. The old ~30-row
+    // recommendation churn (because/tag/starring/directed/genre variants) is
+    // replaced by the six declarative smart shelves; Seerr-only rows stay
+    // gated so a plain Emby install never sees a dead row.
     return [
+      // A 续看区
       _Row((l) => l.continueWatching, () => c.continueWatching(), kind: _Kind.continueWatching, recommends: false),
+      // D 分类区 (server libraries rendered as aligned landscape tiles)
       _Row((l) => l.myLibraries, () => _libraryTiles(s), kind: _Kind.libraries, style: CardStyle.spotlight, recommends: false),
-      for (final (id, name) in _collections(s))
-        _Row((l) => name,
-            () => items(c.query(parentId: id, recursive: false, sortBy: 'PremiereDate,ProductionYear,SortName', limit: 100)),
-            recommends: false),
-      _myListRow = _Row((l) => l.myList, s.myList, recommends: false),
-      _because(s, (t) => t.recentMovies, 0),
-      _Row((l) => l.latestMovies, () => c.latest(types: ['Movie']), recommends: false),
-      if (r.tmdb != null) _Row((l) => l.moodShelfTitle, () async => const [], kind: _Kind.moods, recommends: false),
-      _Row((l) => l.latestShows, () => c.latest(types: ['Episode', 'Series']), style: CardStyle.landscape, recommends: false),
+      // B 更新区
+      smart[0], // 本周更新
+      smart[4], // 一集入坑
+      // C 榜单区
+      smart[1], // 高分经典
+      smart[2], // 新片速递
+      smart[3], // 冷门佳作
       if (seerr != null)
         _Row((l) => l.trendingThisWeek, () => r.mixed((p) => seerr.trending(page: p, timeWindow: 'week'), limit: 10),
             style: CardStyle.ranked),
-      _Row((l) => l.recommendedForYou, () => _forYou(s), style: CardStyle.spotlight),
-      _starring(s, 0),
-      _likeTag(s, 0),
-      _Row((l) => l.collections,
-          () async => _chineseCollections(await c.allCollections(recent: true, limit: 60)),
-          kind: _Kind.collections, recommends: false),
-      _because(s, (t) => t.recentSeries, 0, style: CardStyle.landscape),
-      _Row((l) => l.topRatedMovies, () => items(c.query(types: ['Movie'], sortBy: 'CommunityRating', descending: true, minCommunityRating: 7, limit: 24))),
-      _directedBy(s, 0),
-      _likeTag(s, 1, style: CardStyle.landscape),
-      _because(s, (t) => t.recentMovies, 1, style: CardStyle.landscape),
+      // E 片单区
+      _myListRow = _Row((l) => l.myList, s.myList, recommends: false),
       _Row((l) => l.yourFavorites,
           () => items(c.query(types: ['Movie', 'Series'], filters: 'IsFavorite', sortBy: 'Random', limit: 30)),
           style: CardStyle.landscape, recommends: false),
-      _starring(s, 1, style: CardStyle.landscape),
-      _moreGenre(s, 0),
-      _likeTag(s, 2),
-      _Row((l) => l.recentlyReleased, () => items(c.query(types: ['Movie'], sortBy: 'PremiereDate', descending: true, limit: 24))),
-      _because(s, (t) => t.recentSeries, 1),
-      _Row((l) => l.topRatedShows, () => items(c.query(types: ['Series'], sortBy: 'CommunityRating', descending: true, minCommunityRating: 7, limit: 24)),
-          style: CardStyle.landscape),
-      _starring(s, 2),
-      _moreGenre(s, 1, style: CardStyle.landscape),
-      _likeTag(s, 3),
-      _Row((l) => l.somethingUnseen, () => items(c.query(types: ['Movie'], sortBy: 'Random', filters: 'IsUnplayed', limit: 24))),
-      if (seerr != null)
-        _Row((l) => l.popularToRequest, () async {
-          final (movies, shows) = await (
-            r.requestable((p) => r.discover(SeerrMediaType.movie, page: p, voteCountGte: 200), limit: 20),
-            r.requestable((p) => r.discover(SeerrMediaType.tv, page: p, voteCountGte: 100), limit: 20),
-          ).wait;
-          return _interleave(movies, shows);
-        }),
+      // F 推荐区 (algorithm outlet, sunk to the bottom)
+      smart[5], // 本周推荐
+      _Row((l) => l.recommendedForYou, () => _forYou(s), style: CardStyle.spotlight),
     ];
   }
 
@@ -690,6 +709,22 @@ class _HomePageState extends State<HomePage> {
           padding: const EdgeInsets.only(bottom: Zs.rowGap),
           child: MediaRow(
             title: row.title(context.l10n),
+            trailingTitle: row.smartSpec != null && widget.onOpenSmartList != null
+                ? TvFocusable(
+                    onSelect: () => widget.onOpenSmartList!.call(row.smartSpec!),
+                    builder: (context, focused) => Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                      child: Text(
+                        context.l10n.smartMore,
+                        style: Zt.label.copyWith(
+                          color: focused ? Colors.white : Zc.textMuted,
+                          fontSize: 20,
+                          decoration: focused ? TextDecoration.underline : null,
+                        ),
+                      ),
+                    ),
+                  )
+                : null,
             height: areaH,
             gap: switch ((row.kind, row.style)) {
               (_Kind.collections, _) => 28,
