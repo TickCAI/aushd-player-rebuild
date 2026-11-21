@@ -1,7 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zerk_play/core/emby/models/emby_item.dart';
+import 'package:zerk_play/core/storage/local_store.dart';
+import 'package:zerk_play/data/catalog_api.dart';
 import 'package:zerk_play/data/smart_list.dart';
 import 'package:zerk_play/data/taste_profile.dart';
+import 'package:zerk_play/services/janus/janus_service.dart';
 
 EmbyItem _item(
   String id, {
@@ -24,7 +27,36 @@ EmbyItem _item(
       genres: genres,
     );
 
+/// resolveMixed's local branch for the `my-list` spec is kind=local and never
+/// touches the catalog, so a store that would otherwise fail on a real query is
+/// enough to construct the resolver.
+class _FakeStore implements LocalStore {
+  final Map<String, String> _values = {};
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<String?> getString(String key) async => _values[key];
+
+  @override
+  Future<void> setString(String key, String value) async => _values[key] = value;
+
+  @override
+  Future<void> remove(String key) async => _values.remove(key);
+}
+
+SmartListResolver _resolver({SmartTopUp? topUp}) => SmartListResolver(
+      CatalogApi(
+        janus: JanusService(store: _FakeStore(), deviceName: 'test', appVersion: 'test'),
+      ),
+      const TasteProfile(),
+      topUp: topUp,
+    );
+
 void main() {
+  setUp(() => SmartListResolver.invalidate());
+
   group('scoring primitives', () {
     test('rating is normalized and clamped', () {
       expect(normRating(null), 0);
@@ -68,18 +100,34 @@ void main() {
       );
       expect(tasteMatch(item, taste), 1);
       expect(tasteMatch(item, const TasteProfile()), 0);
-      // Only the genre dimension is available -> one of one.
       expect(
         tasteMatch(item, const TasteProfile(genres: [(genre: 'Drama', count: 1)])),
         1,
       );
     });
 
-    test('itemScore is the documented weighted sum', () {
+    test('itemScore defaults to the documented weighted sum', () {
       final now = DateTime.utc(2026, 1, 1);
       final item = _item('s', rating: 8, date: now);
       final expected = 0.45 * 0.8 + 0.30 * 0 + 0.15 * 1 + 0.10 * stableJitter('s');
       expect(itemScore(item, const TasteProfile(), now: now), closeTo(expected, 1e-9));
+    });
+
+    test('each shelf uses its own scoring weights', () {
+      final now = DateTime.utc(2026, 1, 1);
+      final oldHit = _item('old', rating: 9, date: DateTime.utc(2000, 1, 1));
+      final newHit = _item('new', rating: 9, date: now);
+
+      // classics ignores freshness: age must not cost it points.
+      expect(itemScore(oldHit, const TasteProfile(), now: now, spec: SmartSpec.classics),
+          closeTo(itemScore(newHit, const TasteProfile(), now: now, spec: SmartSpec.classics), 1e-9));
+      // fresh rewards recency heavily.
+      expect(itemScore(newHit, const TasteProfile(), now: now, spec: SmartSpec.fresh),
+          greaterThan(itemScore(oldHit, const TasteProfile(), now: now, spec: SmartSpec.fresh)));
+
+      expect(SmartSpec.classics.wFresh, 0);
+      expect(SmartSpec.gems.wJitter, closeTo(0.30, 1e-9));
+      expect(SmartSpec.picks.wTaste, closeTo(0.50, 1e-9));
     });
   });
 
@@ -102,26 +150,55 @@ void main() {
 
     test('matchesLocal enforces upper rating, year ceiling and unplayed', () {
       final now = DateTime.utc(2026, 1, 1);
-      final gems = SmartSpec.gems; // maxRating 7.8, IsUnplayed
+      final gems = SmartSpec.gems;
       expect(matchesLocal(_item('ok', rating: 7), gems, now: now), isTrue);
       expect(matchesLocal(_item('hi', rating: 8.5), gems, now: now), isFalse);
       expect(matchesLocal(_item('played', rating: 7, played: true), gems, now: now), isFalse);
-      final classics = SmartSpec.classics; // maxYear 2015
-      expect(matchesLocal(_item('new', year: 2024), classics, now: now), isFalse);
+      final classics = SmartSpec.classics;
+      expect(classics.maxYear, isNull); // old classics must not be punished
       expect(matchesLocal(_item('old', year: 2010), classics, now: now), isTrue);
     });
 
     test('time window uses the configured date field', () {
       final now = DateTime.utc(2026, 1, 1);
-      final week = SmartSpec.thisWeek; // windowDays 7, DateCreated
+      final week = SmartSpec.thisWeek;
       expect(matchesLocal(_item('fresh', created: now.subtract(const Duration(days: 3))), week, now: now), isTrue);
       expect(matchesLocal(_item('stale', created: now.subtract(const Duration(days: 30))), week, now: now), isFalse);
     });
 
     test('a shelf hides itself below minItems', () {
-      final spec = SmartSpec.classics; // minItems 6
+      final spec = SmartSpec.classics;
       expect(spec.hides(List.filled(5, _item('x'))), isTrue);
       expect(spec.hides(List.filled(6, _item('x'))), isFalse);
+    });
+  });
+
+  group('mixed shelf', () {
+    test('top-up fills a local-only shelf and dedupes by id', () async {
+      final resolver = _resolver(topUp: (spec, missing) async => [
+            _item('a'),
+            _item('a'), // duplicate must be dropped
+            _item('b'),
+          ]);
+      final out = await resolver.resolveMixed(SmartSpec.myList);
+      expect(out.whereType<EmbyItem>().map((e) => e.id), ['a', 'b']);
+    });
+
+    test('a failing top-up degrades to the local shelf, never throws', () async {
+      final resolver = _resolver(topUp: (spec, missing) async => throw StateError('offline'));
+      final out = await resolver.resolveMixed(SmartSpec.myList);
+      expect(out, isEmpty); // local shelf empty + minItems 1 -> hidden
+    });
+
+    test('top-up result is cached and reuse avoids a second call', () async {
+      var calls = 0;
+      final resolver = _resolver(topUp: (spec, missing) async {
+        calls++;
+        return [_item('a')];
+      });
+      await resolver.resolveMixed(SmartSpec.myList);
+      await resolver.resolveMixed(SmartSpec.myList);
+      expect(calls, 1);
     });
   });
 
