@@ -115,8 +115,9 @@ void main() {
 
     test('each shelf uses its own scoring weights', () {
       final now = DateTime.utc(2026, 1, 1);
-      final oldHit = _item('old', rating: 9, date: DateTime.utc(2000, 1, 1));
-      final newHit = _item('new', rating: 9, date: now);
+      // Same id so stableJitter is identical and only the date varies.
+      final oldHit = _item('same', rating: 9, date: DateTime.utc(2000, 1, 1));
+      final newHit = _item('same', rating: 9, date: now);
 
       // classics ignores freshness: age must not cost it points.
       expect(itemScore(oldHit, const TasteProfile(), now: now, spec: SmartSpec.classics),
