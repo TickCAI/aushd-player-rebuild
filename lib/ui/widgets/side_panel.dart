@@ -39,15 +39,25 @@ Future<T?> showSidePanel<T>(BuildContext context,
 /// Selection is toggled in place; nothing is popped until 确定 so several
 /// values in the same dimension can be combined with OR semantics.
 Future<List<T>?> showMultiSelectSidePanel<T>(BuildContext context,
-    {required String title, required List<PanelOption<T>> options, String confirmLabel = '确定', String clearLabel = '清除'}) {
+    {required String title,
+    required List<PanelOption<T>> options,
+    String confirmLabel = '确定',
+    String clearLabel = '清除',
+    String? searchHint,
+    int? initialLimit}) {
   return Navigator.of(context).push<List<T>>(PageRouteBuilder<List<T>>(
     opaque: false,
     barrierColor: Colors.black54,
     barrierDismissible: true,
     transitionDuration: Zm.normal,
     reverseTransitionDuration: Zm.fast,
-    pageBuilder: (_, _, _) =>
-        _MultiSelectPanel<T>(title: title, options: options, confirmLabel: confirmLabel, clearLabel: clearLabel),
+    pageBuilder: (_, _, _) => _MultiSelectPanel<T>(
+        title: title,
+        options: options,
+        confirmLabel: confirmLabel,
+        clearLabel: clearLabel,
+        searchHint: searchHint,
+        initialLimit: initialLimit),
     transitionsBuilder: (_, anim, _, child) => SlideTransition(
       position: Tween(begin: const Offset(0.15, 0), end: Offset.zero).animate(CurvedAnimation(parent: anim, curve: Zm.curve)),
       child: FadeTransition(opacity: anim, child: child),
@@ -56,12 +66,20 @@ Future<List<T>?> showMultiSelectSidePanel<T>(BuildContext context,
 }
 
 class _MultiSelectPanel<T> extends StatefulWidget {
-  const _MultiSelectPanel({required this.title, required this.options, required this.confirmLabel, required this.clearLabel});
+  const _MultiSelectPanel(
+      {required this.title,
+      required this.options,
+      required this.confirmLabel,
+      required this.clearLabel,
+      this.searchHint,
+      this.initialLimit});
 
   final String title;
   final List<PanelOption<T>> options;
   final String confirmLabel;
   final String clearLabel;
+  final String? searchHint;
+  final int? initialLimit;
 
   @override
   State<_MultiSelectPanel<T>> createState() => _MultiSelectPanelState<T>();
@@ -72,6 +90,23 @@ class _MultiSelectPanelState<T> extends State<_MultiSelectPanel<T>> {
     for (final o in widget.options)
       if (o.selected) o.value,
   ];
+  final _search = TextEditingController();
+  bool _showAll = false;
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  List<PanelOption<T>> get _visible {
+    final q = _search.text.trim().toLowerCase();
+    var list = q.isEmpty ? widget.options : widget.options.where((o) => o.title.toLowerCase().contains(q)).toList();
+    // Cap the long tail until the user asks to see everything.
+    final limit = widget.initialLimit;
+    if (limit != null && !_showAll && q.isEmpty && list.length > limit) list = list.sublist(0, limit);
+    return list;
+  }
 
   void _toggle(T value) => setState(() {
         if (_selected.contains(value)) {
@@ -119,13 +154,49 @@ class _MultiSelectPanelState<T> extends State<_MultiSelectPanel<T>> {
                 Text('${_selected.length}', style: Zt.title.copyWith(color: Zc.accent)),
               ]),
             ),
+            if (widget.searchHint != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(56, 0, 56, 18),
+                child: TextField(
+                  controller: _search,
+                  onChanged: (_) => setState(() {}),
+                  style: Zt.label.copyWith(fontSize: 22),
+                  decoration: InputDecoration(
+                    hintText: widget.searchHint,
+                    hintStyle: Zt.label.copyWith(fontSize: 22, color: Zc.textFaint),
+                    prefixIcon: const Icon(Icons.search_rounded, color: Zc.textFaint),
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: 0.06),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                  ),
+                ),
+              ),
             Expanded(
               child: FocusZone(
                 child: ListView.builder(
                   padding: const EdgeInsets.fromLTRB(28, 0, 28, 20),
-                  itemCount: widget.options.length,
+                  itemCount: _visible.length + (widget.initialLimit != null && !_showAll && _search.text.trim().isEmpty && widget.options.length > widget.initialLimit! ? 1 : 0),
                   itemBuilder: (context, i) {
-                    final o = widget.options[i];
+                    if (i == _visible.length) {
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: TvFocusable(
+                          onSelect: () => setState(() => _showAll = true),
+                          builder: (context, focused) => Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: focused ? Colors.white : Colors.transparent,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Text('显示全部 ${widget.options.length} 项',
+                                style: Zt.label.copyWith(fontSize: 20, color: focused ? Zc.background : Zc.accent)),
+                          ),
+                        ),
+                      );
+                    }
+                    final o = _visible[i];
                     final on = _selected.contains(o.value);
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 8),

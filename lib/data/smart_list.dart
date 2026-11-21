@@ -28,6 +28,10 @@ final class SmartSpec {
     this.limit = 24,
     this.score = false,
     this.requiresSeerr = false,
+    this.wRating = 0.45,
+    this.wTaste = 0.30,
+    this.wFresh = 0.15,
+    this.wJitter = 0.10,
   });
 
   final String id;
@@ -48,46 +52,71 @@ final class SmartSpec {
   final bool score;
   final bool requiresSeerr;
 
+  /// Per-shelf scoring weights. Each list is a distinct intent, so a "classic"
+  /// must not lose points for being old while a "fresh" list must reward it.
+  final double wRating;
+  final double wTaste;
+  final double wFresh;
+  final double wJitter;
+
   /// A shelf is dropped entirely (not shown as "empty") below this count.
   bool hides(List<Object> items) => items.length < minItems;
 
+  /// Intent 1 — 最近入库未看. Ranked by入库 time; no scoring so it never hides
+  /// a just-added title behind an old high-rated one.
   static const thisWeek = SmartSpec(
     id: 'this-week',
     kind: SmartKind.emby,
-    types: ['Episode', 'Series'],
+    types: ['Movie', 'Series'],
     sortBy: 'DateCreated',
     descending: true,
-    windowDays: 7,
+    windowDays: 14,
+    filters: 'IsUnplayed',
     minItems: 4,
     limit: 24,
   );
 
+  /// Intent 2 — 高分剧集. Series only, high score, unplayed. No maxYear: old
+  /// classics must not be punished for being old (wFresh = 0).
   static const classics = SmartSpec(
     id: 'classics',
     kind: SmartKind.emby,
-    types: ['Movie', 'Series'],
+    types: ['Series'],
     minRating: 8,
-    maxYear: 2015,
     filters: 'IsUnplayed',
     sortBy: 'CommunityRating',
     descending: true,
     score: true,
     minItems: 6,
     limit: 24,
+    wRating: 0.60,
+    wTaste: 0.25,
+    wFresh: 0.0,
+    wJitter: 0.15,
   );
 
+  /// Intent 3 — 近期剧集/追更. Premiered recently, unplayed, freshness-led so
+  /// current-season shows surface before back-catalogue.
   static const fresh = SmartSpec(
     id: 'fresh',
     kind: SmartKind.emby,
-    types: ['Movie', 'Series'],
+    types: ['Series'],
+    filters: 'IsUnplayed',
     sortBy: 'PremiereDate',
     descending: true,
-    windowDays: 90,
+    windowDays: 180,
     windowField: 'PremiereDate',
+    score: true,
     minItems: 4,
     limit: 24,
+    wRating: 0.25,
+    wTaste: 0.15,
+    wFresh: 0.50,
+    wJitter: 0.10,
   );
 
+  /// Intent 4 — 冷门佳作. Mid-high rating band, unplayed, rating-led with a
+  /// heavy stable jitter so it reads as "discovery" instead of the same top-8.
   static const gems = SmartSpec(
     id: 'gems',
     kind: SmartKind.emby,
@@ -100,8 +129,13 @@ final class SmartSpec {
     score: true,
     minItems: 6,
     limit: 24,
+    wRating: 0.50,
+    wTaste: 0.20,
+    wFresh: 0.0,
+    wJitter: 0.30,
   );
 
+  /// Intent 5 — 一集入坑 / 观影清单续看. Next unfinished episode per series.
   static const oneEp = SmartSpec(
     id: 'one-ep',
     kind: SmartKind.nextUp,
@@ -109,6 +143,8 @@ final class SmartSpec {
     limit: 24,
   );
 
+  /// Intent 6 — 本周推荐 / 口味匹配. Taste-led; carries People so genre/actor/
+  /// director matching is actually available (the other lists don't need it).
   static const picks = SmartSpec(
     id: 'picks',
     kind: SmartKind.emby,
@@ -120,6 +156,10 @@ final class SmartSpec {
     score: true,
     minItems: 6,
     limit: 24,
+    wRating: 0.25,
+    wTaste: 0.50,
+    wFresh: 0.15,
+    wJitter: 0.10,
   );
 
   /// Defined for the "more" filter page; the home page keeps its richer
@@ -189,15 +229,16 @@ double tasteMatch(EmbyItem item, TasteProfile taste) {
   return total == 0 ? 0 : hits / total;
 }
 
-/// 0.45 rating + 0.30 taste + 0.15 freshness + 0.10 stable jitter.
-double itemScore(EmbyItem item, TasteProfile taste, {DateTime? now}) =>
-    0.45 * normRating(item.communityRating) +
-    0.30 * tasteMatch(item, taste) +
-    0.15 * freshness(item, now: now) +
-    0.10 * stableJitter(item.id);
+/// Weighted sum. Defaults match the original 0.45/0.30/0.15/0.10 so callers
+/// that don't pass a spec keep the documented behaviour.
+double itemScore(EmbyItem item, TasteProfile taste, {DateTime? now, SmartSpec? spec}) =>
+    (spec?.wRating ?? 0.45) * normRating(item.communityRating) +
+    (spec?.wTaste ?? 0.30) * tasteMatch(item, taste) +
+    (spec?.wFresh ?? 0.15) * freshness(item, now: now) +
+    (spec?.wJitter ?? 0.10) * stableJitter(item.id);
 
-List<EmbyItem> scoreSort(Iterable<EmbyItem> items, TasteProfile taste, {DateTime? now}) {
-  final scored = [for (final i in items) (item: i, score: itemScore(i, taste, now: now))];
+List<EmbyItem> scoreSort(Iterable<EmbyItem> items, TasteProfile taste, {DateTime? now, SmartSpec? spec}) {
+  final scored = [for (final i in items) (item: i, score: itemScore(i, taste, now: now, spec: spec))];
   scored.sort((a, b) {
     final c = b.score.compareTo(a.score);
     return c != 0 ? c : a.item.id.compareTo(b.item.id);
@@ -230,42 +271,44 @@ bool matchesLocal(EmbyItem item, SmartSpec spec, {DateTime? now}) {
   return true;
 }
 
-/// Turns a declarative spec into a shelf of library items. Pure enough to be
-/// driven in tests with a stub catalog; no Flutter, no I/O beyond CatalogApi.
+/// Extra candidate source used when the local library cannot fill a shelf.
+/// Returns mixed EmbyItem / SeerrMedia objects — the home cards render both.
+/// `missing` is the number of free slots left on the shelf.
+typedef SmartTopUp = Future<List<Object>> Function(SmartSpec spec, int missing);
+
+/// Turns a declarative spec into a shelf of items. Pure enough to be driven in
+/// tests with a stub catalog; no Flutter, no I/O beyond CatalogApi.
 final class SmartListResolver {
-  SmartListResolver(this._catalog, this._taste);
+  SmartListResolver(this._catalog, this._taste, {SmartTopUp? topUp}) : _topUp = topUp;
 
   final CatalogApi _catalog;
   final TasteProfile _taste;
+  final SmartTopUp? _topUp;
 
   /// In-memory TTL cache (§5.3). Keyed by spec id + taste genres so a rebuild
   /// after a settings change does not re-hit the server within the window.
-  static final Map<String, ({List<EmbyItem> items, DateTime at})> _cache = {};
+  static final Map<String, ({List<Object> items, DateTime at})> _cache = {};
   static const _ttl = Duration(minutes: 30);
 
   /// Drop cached shelves when the library changes.
   static void invalidate() => _cache.clear();
 
-  Future<List<EmbyItem>> resolve(SmartSpec spec, {DateTime? now, List<String>? tasteGenres}) async {
-    final at = now ?? DateTime.now();
-    final key = '${spec.id}|${(tasteGenres ?? _taste.genres.take(3).map((g) => g.genre).toList()).join(',')}';
-    final hit = _cache[key];
-    if (hit != null && at.difference(hit.at) < _ttl) return hit.items;
+  List<String> _genres(List<String>? tasteGenres) =>
+      tasteGenres ?? _taste.genres.take(3).map((g) => g.genre).toList();
 
-    final List<EmbyItem> result;
+  Future<List<EmbyItem>> _local(SmartSpec spec, {required DateTime at, required List<String> genres}) async {
     switch (spec.kind) {
       case SmartKind.local:
       case SmartKind.seerr:
       case SmartKind.hybrid:
-        result = const <EmbyItem>[];
+        return const <EmbyItem>[];
 
       case SmartKind.nextUp:
         final up = await _catalog.nextUp(limit: spec.limit);
         final seen = <String>{};
-        result = [for (final i in up) if (i.seriesId != null && seen.add(i.seriesId!)) i].take(spec.limit).toList();
+        return [for (final i in up) if (i.seriesId != null && seen.add(i.seriesId!)) i].take(spec.limit).toList();
 
       case SmartKind.emby:
-        final genres = tasteGenres ?? _taste.genres.take(3).map((g) => g.genre).toList();
         final page = await _catalog.query(
           types: spec.types,
           sortBy: spec.sortBy,
@@ -279,12 +322,42 @@ final class SmartListResolver {
           limit: spec.limit,
         );
         var items = [for (final i in page.items) if (matchesLocal(i, spec, now: at)) i];
-        if (spec.score) items = scoreSort(items, _taste, now: at);
-        result = dedupeById(items).take(spec.limit).toList();
+        if (spec.score) items = scoreSort(items, _taste, now: at, spec: spec);
+        return dedupeById(items).take(spec.limit).toList();
     }
-    // Below minItems the whole shelf is suppressed (§3.2) — an almost-empty
-    // row reads as broken, so return nothing rather than a "no content" stub.
-    final shelf = spec.hides(result) ? const <EmbyItem>[] : result;
+  }
+
+  /// Local-only shelf — pure, used by tests and as the base of the mixed shelf.
+  Future<List<EmbyItem>> resolve(SmartSpec spec, {DateTime? now, List<String>? tasteGenres}) async {
+    final local = await _local(spec, at: now ?? DateTime.now(), genres: _genres(tasteGenres));
+    return spec.hides(local) ? const <EmbyItem>[] : local;
+  }
+
+  /// Mixed shelf: local items first, then an optional Seerr/TMDB top-up when
+  /// the library cannot fill the row. Below minItems the whole shelf is hidden.
+  Future<List<Object>> resolveMixed(SmartSpec spec, {DateTime? now, List<String>? tasteGenres}) async {
+    final at = now ?? DateTime.now();
+    final genres = _genres(tasteGenres);
+    final key = '${spec.id}|${genres.join(',')}|${_topUp == null ? 'local' : 'mixed'}';
+    final hit = _cache[key];
+    if (hit != null && at.difference(hit.at) < _ttl) return hit.items;
+
+    final result = <Object>[...await _local(spec, at: at, genres: genres)];
+    final topUp = _topUp;
+    if (topUp != null && result.length < spec.limit) {
+      try {
+        final extra = await topUp(spec, spec.limit - result.length);
+        final seen = {for (final i in result) if (i is EmbyItem) i.id};
+        for (final e in extra) {
+          if (result.length >= spec.limit) break;
+          if (e is EmbyItem && !seen.add(e.id)) continue;
+          result.add(e);
+        }
+      } catch (_) {
+        // A failed top-up degrades to the local shelf; never blank the row.
+      }
+    }
+    final shelf = spec.hides(result) ? const <Object>[] : result;
     _cache[key] = (items: shelf, at: at);
     return shelf;
   }

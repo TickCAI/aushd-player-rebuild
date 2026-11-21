@@ -66,7 +66,7 @@ enum _BrowseTab {
 
 /// The five facets the user approved. Values inside one facet combine with OR;
 /// different facets combine with AND. 类型 (genre) reuses the existing toolbar
-/// selector, so the extra facet buttons here cover 平台/年份/地区.
+/// selector, so the extra facet buttons here cover 出品方/年份/地区.
 enum _Facet { studio, year, region }
 
 class LibraryPage extends StatefulWidget {
@@ -165,9 +165,19 @@ class _LibraryPageState extends State<LibraryPage> {
 
   /// Distinct facet values seen so far, used to populate the pickers. Region
   /// values are normalized to Chinese buckets through ContentZh.region.
-  Map<String, String> _studioOptions() => {
-        for (final s in _distinct(_items.expand((i) => i.studios))) s: s,
-      };
+  /// Studios seen in the current library, ranked by frequency so the popular
+  /// production houses surface first. The picker caps the long tail but keeps
+  /// search, so a rare studio is still reachable.
+  Map<String, String> _studioOptions() {
+    final counts = <String, int>{};
+    for (final item in _items) {
+      for (final s in item.studios) {
+        counts[s] = (counts[s] ?? 0) + 1;
+      }
+    }
+    final sorted = counts.keys.toList()..sort((a, b) => counts[b]!.compareTo(counts[a]!));
+    return {for (final s in sorted) s: s};
+  }
   Map<int, String> _yearOptions() => {
         for (final y in _distinct(_items.map((i) => i.premiereDate?.year))) y: '$y',
       };
@@ -208,7 +218,7 @@ class _LibraryPageState extends State<LibraryPage> {
     final picked = await showMultiSelectSidePanel<T>(
       context,
       title: switch (facet) {
-        _Facet.studio => '平台',
+        _Facet.studio => '出品方',
         _Facet.year => '年份',
         _Facet.region => '地区',
       },
@@ -216,6 +226,8 @@ class _LibraryPageState extends State<LibraryPage> {
         for (final e in options.entries)
           PanelOption<T>(value: e.key, title: e.value, selected: selected.contains(e.key)),
       ],
+      searchHint: facet == _Facet.studio ? '搜索出品方' : null,
+      initialLimit: facet == _Facet.studio ? 12 : null,
     );
     if (picked == null) return;
     setState(() {
@@ -615,7 +627,7 @@ class _LibraryPageState extends State<LibraryPage> {
                       scrollDirection: Axis.horizontal,
                       child: Row(children: [
                         TvButton(
-                          label: _studios.isEmpty ? '平台' : '平台·${_studios.length}',
+                          label: _studios.isEmpty ? '出品方' : '出品方·${_studios.length}',
                           icon: Icons.business_rounded,
                           onSelect: () => _pickFacet(_Facet.studio, _studioOptions(), _studios),
                         ),

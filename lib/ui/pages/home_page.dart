@@ -265,6 +265,31 @@ class _HomePageState extends State<HomePage> {
         return const TasteProfile();
       });
 
+  /// Builds the optional external top-up for a smart shelf. Only active when
+  /// Seerr or TMDB is configured; otherwise the resolver stays local-only and
+  /// no network call is made. `resolve` maps TMDB hits back to library items
+  /// and leaves unrequested titles as SeerrMedia (which mixedCard renders).
+  SmartTopUp? _smartTopUp(AppServices s) {
+    if (s.seerr == null && s.tmdb == null) return null;
+    return (spec, missing) async {
+      final type = spec.types?.any((t) => t == 'Series' || t == 'Episode') == true
+          ? SeerrMediaType.tv
+          : SeerrMediaType.movie;
+      final sortBy = switch (spec.id) {
+        'classics' || 'picks' => 'vote_average.desc',
+        'fresh' || 'this-week' => 'release_date.desc',
+        'gems' => 'popularity.asc',
+        _ => 'popularity.desc',
+      };
+      final extra = <String, String>{};
+      if (sortBy == 'vote_average.desc') {
+        extra['vote_count.gte'] = type == SeerrMediaType.tv ? '200' : '500';
+      }
+      final page = await s.recommender.discover(type, page: 1, sortBy: sortBy, extra: extra);
+      return s.recommender.resolve(page.take(missing).toList());
+    };
+  }
+
   /// Build a row backed by a declarative SmartSpec (§5). Every smart row is
   /// non-recommending by default: these shelves already apply their own
   /// taste/unplayed filters, so the global `keptInRecommendations` gate would
@@ -272,8 +297,8 @@ class _HomePageState extends State<HomePage> {
   _Row _smartRow(AppServices s, SmartSpec spec, String Function(L10n) title,
       {CardStyle style = CardStyle.poster}) {
     return _Row(title, () async {
-      final resolver = SmartListResolver(s.catalog, await _profile(s));
-      return resolver.resolve(spec);
+      final resolver = SmartListResolver(s.catalog, await _profile(s), topUp: _smartTopUp(s));
+      return resolver.resolveMixed(spec);
     }, style: style, recommends: false, smartSpec: spec);
   }
 
