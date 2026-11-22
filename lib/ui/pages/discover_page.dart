@@ -417,7 +417,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Icon(
-            _filters.isActive ? Icons.filter_alt_rounded : Icons.filter_alt_outlined_rounded,
+            _filters.isActive ? Icons.filter_alt_rounded : Icons.filter_alt_outlined,
             size: 26,
             color: focused ? Zc.text : (_filters.isActive ? Zc.request : Zc.textMuted),
           ),
