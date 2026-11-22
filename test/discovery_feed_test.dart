@@ -24,6 +24,44 @@ void main() {
     });
   });
 
+  group('DiscoveryFilters', () {
+    test('default filters are inactive and have a stable signature', () {
+      const f = DiscoveryFilters();
+      expect(f.isActive, isFalse);
+      expect(f.signature, 'all|hot|null|null|null');
+    });
+
+    test('every filter dimension flips isActive and changes the signature', () {
+      const base = DiscoveryFilters();
+      const media = DiscoveryFilters(mediaType: FilterMediaType.tv);
+      const sort = DiscoveryFilters(sort: FilterSort.rating);
+      const year = DiscoveryFilters(yearFrom: 2020, yearTo: 2024);
+      const genre = DiscoveryFilters(genre: 878);
+
+      for (final f in [media, sort, year, genre]) {
+        expect(f.isActive, isTrue);
+        expect(f.signature, isNot(base.signature));
+      }
+      expect(media.signature, 'tv|hot|null|null|null');
+      expect(sort.signature, 'all|rating|null|null|null');
+      expect(year.signature, 'all|hot|2020|2024|null');
+      expect(genre.signature, 'all|hot|null|null|878');
+    });
+
+    test('genre 0 counts as inactive (the "All" option)', () {
+      expect(const DiscoveryFilters(genre: 0).isActive, isFalse);
+    });
+
+    test('genre and year option tables have unique ids', () {
+      final genres = DiscoveryFilters.genreOptions.map((o) => o.$1).toSet();
+      expect(genres.length, DiscoveryFilters.genreOptions.length);
+      final years = DiscoveryFilters.yearOptions
+          .map((o) => '${o.$1}/${o.$2}')
+          .toSet();
+      expect(years.length, DiscoveryFilters.yearOptions.length);
+    });
+  });
+
   group('DiscoveryFeed pagination', () {
     test('appends pages in order and de-duplicates by key', () async {
       final seenPages = <int>[];
