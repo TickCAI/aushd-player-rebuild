@@ -346,6 +346,9 @@ class RequestPosterCard extends StatelessWidget {
     this.onFocus,
     this.autofocus = false,
     this.width = Zs.posterWidth,
+    this.statusLabel,
+    this.statusIcon,
+    this.statusColor,
   });
 
   final SeerrMedia media;
@@ -354,12 +357,20 @@ class RequestPosterCard extends StatelessWidget {
   final bool autofocus;
   final double width;
 
+  /// Override the bottom pill. Discovery cards reuse this widget but show
+  /// "Play / Watch later / In watchlist" instead of the Seerr request states.
+  final String? statusLabel;
+  final IconData? statusIcon;
+  final Color? statusColor;
+
   @override
   Widget build(BuildContext context) => RequestStateBuilder(media: media, builder: _build);
 
   Widget _build(BuildContext context, Availability availability, ReleaseInfo? release) {
     final height = width * 1.5;
-    final (label, color) = requestStatusLabel(context.l10n, availability, release: release);
+    final (defaultLabel, defaultColor) = requestStatusLabel(context.l10n, availability, release: release);
+    final label = statusLabel ?? defaultLabel;
+    final color = statusColor ?? defaultColor;
     return TvFocusable(
       autofocus: autofocus,
       onSelect: onSelect,
@@ -397,11 +408,12 @@ class RequestPosterCard extends StatelessWidget {
                     ),
                     child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                       Icon(
-                          availability.canRequest
-                              ? Icons.add_circle_outline_rounded
-                              : release?.notOut ?? false
-                                  ? Icons.hourglass_top_rounded
-                                  : Icons.schedule_rounded,
+                          statusIcon ??
+                              (availability.canRequest
+                                  ? Icons.add_circle_outline_rounded
+                                  : release?.notOut ?? false
+                                      ? Icons.hourglass_top_rounded
+                                      : Icons.schedule_rounded),
                           size: 20,
                           color: Zc.background),
                       const SizedBox(width: 6),

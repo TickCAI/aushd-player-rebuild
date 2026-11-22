@@ -30,6 +30,66 @@ enum DiscoveryCategory {
       };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Search / filter model
+// ────────────────────────────────────────────────────────────────────────────
+
+enum FilterMediaType { all, movie, tv }
+
+enum FilterSort { hot, rating, latest }
+
+/// Immutable filter selection applied on top of any discovery query.
+///
+/// Kept in the data layer (no Flutter/l10n dependency) so it can be unit
+/// tested and used as a stable cache-key signature.
+final class DiscoveryFilters {
+  const DiscoveryFilters({
+    this.mediaType = FilterMediaType.all,
+    this.sort = FilterSort.hot,
+    this.yearFrom,
+    this.yearTo,
+    this.genre,
+  });
+
+  final FilterMediaType mediaType;
+  final FilterSort sort;
+  final int? yearFrom;
+  final int? yearTo;
+
+  /// TMDB genre id (0 == any). See [genreOptions].
+  final int? genre;
+
+  bool get isActive => mediaType != FilterMediaType.all ||
+      sort != FilterSort.hot ||
+      yearFrom != null ||
+      yearTo != null ||
+      (genre != null && genre != 0);
+
+  /// Stable key so a filter change gets a fresh feed instead of reusing pages
+  /// fetched under different criteria.
+  String get signature => '${mediaType.name}|${sort.name}|$yearFrom|$yearTo|$genre';
+
+  /// (id, l10n suffix) pairs for the genre filter chip cycle.
+  static const genreOptions = <(int, String)>[
+    (0, 'All'),
+    (28, 'Action'),
+    (35, 'Comedy'),
+    (878, 'SciFi'),
+    (16, 'Animation'),
+    (9648, 'Mystery'),
+    (27, 'Horror'),
+  ];
+
+  /// (from, to, l10n suffix) triples for the year filter chip cycle.
+  static const yearOptions = <(int?, int?, String)>[
+    (null, null, 'All'),
+    (2020, null, 'Y2020s'),
+    (2010, 2019, 'Y2010s'),
+    (2000, 2009, 'Y2000s'),
+    (null, 1999, 'YOld'),
+  ];
+}
+
 /// Fetches one page of real discovery results for a category.
 ///
 /// Results are always `SeerrMedia` (TMDB metadata + Seerr request status) and
@@ -48,7 +108,17 @@ final class DiscoverySource {
 
   bool get available => tmdb != null || seerr != null;
 
-  Future<List<SeerrMedia>> fetch(DiscoveryCategory category, {required int page}) async {
+  /// Fetch one page. When [filters] is active the category query is replaced
+  /// by a single, filter-aware TMDB discover call so the four filter dimensions
+  /// (type / sort / year / genre) behave consistently across all categories.
+  Future<List<SeerrMedia>> fetch(DiscoveryCategory category, {
+    required int page,
+    DiscoveryFilters? filters,
+  }) async {
+    final f = filters;
+    if (f != null && f.isActive) {
+      return _withStatuses(await _filteredDiscover(f, page));
+    }
     final list = switch (category) {
       DiscoveryCategory.todayPicks => await _trending(page, 'day'),
       DiscoveryCategory.trending => await _trending(page, 'week'),
@@ -62,6 +132,55 @@ final class DiscoverySource {
           SeerrMediaType.movie, page, sortBy: 'popularity.desc', extra: const {'with_genres': '16'}),
     };
     return _withStatuses(list);
+  }
+
+  /// Real TMDB (or Seerr) multi-search with the same filters applied client
+  /// side, so searching obeys the active type / sort / year / genre selection.
+  Future<List<SeerrMedia>> search(String query, {
+    required int page,
+    DiscoveryFilters? filters,
+  }) async {
+    final t = tmdb;
+    final raw = t != null
+        ? [for (final r in await t.searchMulti(query, page: page, language: language)) ?SeerrMedia.fromTmdb(r)]
+        : await seerr?.search(query) ?? const <SeerrMedia>[];
+    return _withStatuses(_applyFilters(raw, filters));
+  }
+
+  Future<List<SeerrMedia>> _filteredDiscover(DiscoveryFilters f, int page) async {
+    final tv = f.mediaType == FilterMediaType.tv;
+    final extra = <String, String>{};
+    final yearKey = tv ? 'first_air_date' : 'release_date';
+    if (f.yearFrom != null) extra['$yearKey.gte'] = '${f.yearFrom}-01-01';
+    if (f.yearTo != null) extra['$yearKey.lte'] = '${f.yearTo}-12-31';
+    if (f.genre != null && f.genre! > 0) extra['with_genres'] = '${f.genre}';
+    final sortBy = switch (f.sort) {
+      FilterSort.rating => 'vote_average.desc',
+      FilterSort.latest => '$yearKey.desc',
+      FilterSort.hot => 'popularity.desc',
+    };
+    return _discover(
+      tv ? SeerrMediaType.tv : SeerrMediaType.movie,
+      page,
+      sortBy: sortBy,
+      voteCountGte: f.sort == FilterSort.rating ? 100 : null,
+      extra: extra,
+    );
+  }
+
+  /// Client-side filter used for search results and Seerr fallbacks (which
+  /// cannot express with_genres / year ranges server-side).
+  List<SeerrMedia> _applyFilters(List<SeerrMedia> list, DiscoveryFilters? f) {
+    if (f == null || !f.isActive) return list;
+    return [
+      for (final m in list)
+        if ((f.mediaType == FilterMediaType.all ||
+                (f.mediaType == FilterMediaType.movie) == !m.isTv) &&
+            (f.genre == null || f.genre == 0 || m.genreIds.contains(f.genre)) &&
+            (f.yearFrom == null || (m.year ?? 0) >= f.yearFrom!) &&
+            (f.yearTo == null || (m.year ?? 9999) <= f.yearTo!))
+          m,
+    ];
   }
 
   Future<List<SeerrMedia>> _trending(int page, String window) async {
@@ -114,7 +233,7 @@ final class DiscoverySource {
     return const [];
   }
 
-  /// Enrich with Seerr request status so cards show "Request / Available / …".
+  /// Enrich with Seerr request status so cards show live availability.
   /// A status lookup failure must never blank the feed.
   Future<List<SeerrMedia>> _withStatuses(List<SeerrMedia> media) async {
     final s = seerr;
