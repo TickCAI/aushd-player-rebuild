@@ -28,7 +28,7 @@ void main() {
     test('default filters are inactive and have a stable signature', () {
       const f = DiscoveryFilters();
       expect(f.isActive, isFalse);
-      expect(f.signature, 'all|hot|null|null|null');
+      expect(f.signature, 'all|hot|null|null|null|null');
     });
 
     test('every filter dimension flips isActive and changes the signature', () {
@@ -37,28 +37,32 @@ void main() {
       const sort = DiscoveryFilters(sort: FilterSort.rating);
       const year = DiscoveryFilters(yearFrom: 2020, yearTo: 2024);
       const genre = DiscoveryFilters(genre: 878);
+      const region = DiscoveryFilters(region: 'zh');
 
-      for (final f in [media, sort, year, genre]) {
+      for (final f in [media, sort, year, genre, region]) {
         expect(f.isActive, isTrue);
         expect(f.signature, isNot(base.signature));
       }
-      expect(media.signature, 'tv|hot|null|null|null');
-      expect(sort.signature, 'all|rating|null|null|null');
-      expect(year.signature, 'all|hot|2020|2024|null');
-      expect(genre.signature, 'all|hot|null|null|878');
+      expect(media.signature, 'tv|hot|null|null|null|null');
+      expect(sort.signature, 'all|rating|null|null|null|null');
+      expect(year.signature, 'all|hot|2020|2024|null|null');
+      expect(genre.signature, 'all|hot|null|null|878|null');
+      expect(region.signature, 'all|hot|null|null|null|zh');
     });
 
-    test('genre 0 counts as inactive (the "All" option)', () {
+    test('genre 0 and empty/null region count as inactive', () {
       expect(const DiscoveryFilters(genre: 0).isActive, isFalse);
+      expect(const DiscoveryFilters(region: null).isActive, isFalse);
+      expect(const DiscoveryFilters(region: '').isActive, isFalse);
     });
 
-    test('genre and year option tables have unique ids', () {
+    test('genre, year and region option tables have unique ids', () {
       final genres = DiscoveryFilters.genreOptions.map((o) => o.$1).toSet();
       expect(genres.length, DiscoveryFilters.genreOptions.length);
-      final years = DiscoveryFilters.yearOptions
-          .map((o) => '${o.$1}/${o.$2}')
-          .toSet();
+      final years = DiscoveryFilters.yearOptions.map((o) => '${o.$1}/${o.$2}').toSet();
       expect(years.length, DiscoveryFilters.yearOptions.length);
+      final regions = DiscoveryFilters.regionOptions.map((o) => o.$1 ?? '').toSet();
+      expect(regions.length, DiscoveryFilters.regionOptions.length);
     });
   });
 
