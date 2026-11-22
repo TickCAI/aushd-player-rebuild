@@ -255,7 +255,8 @@ class _ShellState extends State<Shell> {
 
   List<ShellTab> _tabs(AppServices s) => [
     for (final t in ShellTab.values)
-      if ((t != ShellTab.discover || s.seerr != null) && (t != ShellTab.calendar || s.tmdb != null || s.seerr != null) &&
+      if ((t != ShellTab.discover || (s.seerr != null || s.tmdb != null)) &&
+          (t != ShellTab.calendar || s.tmdb != null || s.seerr != null) &&
           (t != ShellTab.liveTv || s.liveTvAvailable || s.embyTvAvailable) &&
           (t != ShellTab.together || s.together.available) &&
           ((t != ShellTab.myList && t != ShellTab.profile) || s.profiles.profile != null)) t,
@@ -391,6 +392,7 @@ class _ShellState extends State<Shell> {
     ShellTab.home => HomePage(
         onOpenLibraryView: _selectLibraryView,
         onOpenSmartList: (spec) => openSmartList(context, spec),
+        onOpenDiscover: () => _select(ShellTab.discover),
       ),
     ShellTab.search => const SearchPage(),
     ShellTab.movies => LibraryPage(

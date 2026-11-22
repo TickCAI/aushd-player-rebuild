@@ -59,13 +59,17 @@ class _Row {
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.onOpenLibraryView, this.onOpenSmartList});
+  const HomePage({super.key, this.onOpenLibraryView, this.onOpenSmartList, this.onOpenDiscover});
 
   /// Called when a server-library tile on the home page is activated.
   final ValueChanged<LibraryView>? onOpenLibraryView;
 
   /// Called when a smart-list row's "More" affordance is activated.
   final ValueChanged<SmartSpec>? onOpenSmartList;
+
+  /// Called when the "Discover" entry is activated. Discovery content lives in
+  /// its own page (real TMDB/Seerr feed), kept separate from library rows.
+  final VoidCallback? onOpenDiscover;
 
   static final firstLoad = ValueNotifier(true);
 
@@ -265,40 +269,18 @@ class _HomePageState extends State<HomePage> {
         return const TasteProfile();
       });
 
-  /// Builds the optional external top-up for a smart shelf. Only active when
-  /// Seerr or TMDB is configured; otherwise the resolver stays local-only and
-  /// no network call is made. `resolve` maps TMDB hits back to library items
-  /// and leaves unrequested titles as SeerrMedia (which mixedCard renders).
-  SmartTopUp? _smartTopUp(AppServices s) {
-    if (s.seerr == null && s.tmdb == null) return null;
-    return (spec, missing) async {
-      final type = spec.types?.any((t) => t == 'Series' || t == 'Episode') == true
-          ? SeerrMediaType.tv
-          : SeerrMediaType.movie;
-      final sortBy = switch (spec.id) {
-        'classics' || 'picks' => 'vote_average.desc',
-        'fresh' || 'this-week' => 'release_date.desc',
-        'gems' => 'popularity.asc',
-        _ => 'popularity.desc',
-      };
-      final extra = <String, String>{};
-      if (sortBy == 'vote_average.desc') {
-        extra['vote_count.gte'] = type == SeerrMediaType.tv ? '200' : '500';
-      }
-      final page = await s.recommender.discover(type, page: 1, sortBy: sortBy, extra: extra);
-      return s.recommender.resolve(page.take(missing).toList());
-    };
-  }
-
   /// Build a row backed by a declarative SmartSpec (§5). Every smart row is
   /// non-recommending by default: these shelves already apply their own
   /// taste/unplayed filters, so the global `keptInRecommendations` gate would
   /// silently drop most of them.
+  ///
+  /// Discovery content lives in its own space (DiscoverPage) and is never
+  /// mixed into these library-backed shelves (§3.1 two-system separation).
   _Row _smartRow(AppServices s, SmartSpec spec, String Function(L10n) title,
       {CardStyle style = CardStyle.poster}) {
     return _Row(title, () async {
-      final resolver = SmartListResolver(s.catalog, await _profile(s), topUp: _smartTopUp(s));
-      return resolver.resolveMixed(spec);
+      final resolver = SmartListResolver(s.catalog, await _profile(s));
+      return resolver.resolve(spec);
     }, style: style, recommends: false, smartSpec: spec);
   }
 
@@ -675,7 +657,13 @@ class _HomePageState extends State<HomePage> {
                     padding: EdgeInsets.only(top: 24, bottom: pointer ? 60 : height * 0.5),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [for (final (i, row) in rows.indexed) _buildRow(row, first: i == 0)],
+                      children: [
+                        for (final (i, row) in rows.indexed) _buildRow(row, first: i == 0),
+                        // Visual break: the discovery feed is a separate system
+                        // (request-style SeerrMedia, never owned/playable here).
+                        if (widget.onOpenDiscover != null)
+                          _discoverEntry(context.l10n, pointer: pointer, rightInset: rightInset),
+                      ],
                     ),
                   ),
                 ],
@@ -700,6 +688,37 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
     ]);
+  }
+
+  /// A visually distinct entry into the real discovery feed. Kept apart from
+  /// library rows so "discover" titles never look like owned content.
+  Widget _discoverEntry(L10n l10n, {required bool pointer, required double rightInset}) {
+    return Padding(
+      padding: EdgeInsets.only(left: contentLeft, right: rightInset, top: 40, bottom: pointer ? 60.0 : 200.0),
+      child: TvFocusable(
+        onSelect: widget.onOpenDiscover,
+        builder: (context, focused) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+          decoration: BoxDecoration(
+            color: focused ? Zc.surface : Zc.background,
+            borderRadius: BorderRadius.circular(Zs.radiusLarge),
+            border: Border.all(color: focused ? Zc.request : Zc.outline, width: 2),
+          ),
+          child: Row(children: [
+            const Icon(Icons.explore_rounded, size: 56, color: Zc.request),
+            const SizedBox(width: 24),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(l10n.discover, style: Zt.title),
+                const SizedBox(height: 6),
+                Text(l10n.discoverySubtitle, style: Zt.label.copyWith(color: Zc.textMuted)),
+              ]),
+            ),
+            const Icon(Icons.arrow_forward_rounded, size: 40, color: Zc.textMuted),
+          ]),
+        ),
+      ),
+    );
   }
 
   Widget _buildRow(_Row row, {required bool first}) {
