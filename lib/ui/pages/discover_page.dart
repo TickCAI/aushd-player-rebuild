@@ -5,20 +5,21 @@ import '../../core/emby/models/emby_item.dart';
 import '../../data/discovery_feed.dart';
 import '../../data/seerr_api.dart';
 import '../../l10n/l10n.dart';
-import '../core/playback_launcher.dart';
 import '../focus/focus_zone.dart';
 import '../focus/tv_focusable.dart';
 import '../theme/tokens.dart';
 import '../widgets/cards.dart';
 import '../widgets/common.dart';
+import '../widgets/discovery_filter_panel.dart';
 import '../widgets/media_row.dart';
 import 'routes.dart';
 
 /// Discover centre — a *real*, endlessly paged feed of TMDB / Seerr titles.
 ///
 /// Cards here are TMDB results, never local EmbyItems. Each card checks the
-/// user's imported library by TMDB id: a match plays immediately, otherwise
-/// the title can be added to the local "watch later" (待播) list. Discovery
+/// user's imported library by TMDB id: a match opens its Emby detail page,
+/// otherwise the Seerr detail page opens. Playback (or episode selection)
+/// only starts when the user presses play *inside* that detail page. Discovery
 /// content therefore never masquerades as owned media.
 class DiscoverPage extends StatefulWidget {
   const DiscoverPage({super.key});
@@ -155,91 +156,82 @@ class _DiscoverPageState extends State<DiscoverPage> {
     _resetFeed();
   }
 
-  void _cycleMediaType() {
-    final next = switch (_filters.mediaType) {
-      FilterMediaType.all => FilterMediaType.movie,
-      FilterMediaType.movie => FilterMediaType.tv,
-      FilterMediaType.tv => FilterMediaType.all,
-    };
-    setState(() => _filters = DiscoveryFilters(
-          mediaType: next,
-          sort: _filters.sort,
-          yearFrom: _filters.yearFrom,
-          yearTo: _filters.yearTo,
-          genre: _filters.genre,
-        ));
+  /// Open the detailed filter panel. Replaces the old four cycle-chips with a
+  /// single place listing every dimension (type / sort / year / region /
+  /// genre), matching the "详细的列表分类" request.
+  Future<void> _openFilters() async {
+    final l10n = context.l10n;
+    final chosen = await showDiscoveryFilterPanel(
+      context,
+      initial: _filters,
+      labels: _filterLabels(l10n),
+    );
+    if (chosen == null || !mounted) return;
+    setState(() => _filters = chosen);
     _resetFeed();
   }
 
-  void _cycleSort() {
-    final next = switch (_filters.sort) {
-      FilterSort.hot => FilterSort.rating,
-      FilterSort.rating => FilterSort.latest,
-      FilterSort.latest => FilterSort.hot,
-    };
-    setState(() => _filters = DiscoveryFilters(
-          mediaType: _filters.mediaType,
-          sort: next,
-          yearFrom: _filters.yearFrom,
-          yearTo: _filters.yearTo,
-          genre: _filters.genre,
-        ));
-    _resetFeed();
-  }
+  /// Labels for every option key used inside the filter panel.
+  Map<String, String> _filterLabels(L10n l10n) => {
+        'FilterTitle': l10n.discoveryFilterTitle,
+        'MediaType': l10n.discoveryFilterMediaType,
+        'Sort': l10n.discoveryFilterSort,
+        'Year': l10n.discoveryFilterYear,
+        'Region': l10n.discoveryFilterRegion,
+        'Genre': l10n.discoveryFilterGenre,
+        'Clear': l10n.discoveryClearFilters,
+        'Confirm': l10n.discoveryConfirm,
+        'FilterAll': l10n.discoveryFilterAll,
+        'FilterMovie': l10n.discoveryFilterMovie,
+        'FilterTv': l10n.discoveryFilterTv,
+        'SortHot': l10n.discoverySortHot,
+        'SortRating': l10n.discoverySortRating,
+        'SortLatest': l10n.discoverySortLatest,
+        'All': l10n.discoveryFilterAll,
+        'Y2020s': l10n.discoveryYear2020,
+        'Y2010s': l10n.discoveryYear2010,
+        'Y2000s': l10n.discoveryYear2000,
+        'YOld': l10n.discoveryYearOld,
+        'Chinese': l10n.discoveryRegionChinese,
+        'English': l10n.discoveryRegionEnglish,
+        'Japanese': l10n.discoveryRegionJapanese,
+        'Korean': l10n.discoveryRegionKorean,
+        'French': l10n.discoveryRegionFrench,
+        'German': l10n.discoveryRegionGerman,
+        'Spanish': l10n.discoveryRegionSpanish,
+        'Italian': l10n.discoveryRegionItalian,
+        'Russian': l10n.discoveryRegionRussian,
+        'Thai': l10n.discoveryRegionThai,
+        'Hindi': l10n.discoveryRegionHindi,
+        'Action': l10n.discoveryGenreAction,
+        'Adventure': l10n.discoveryGenreAdventure,
+        'Animation': l10n.discoveryGenreAnimation,
+        'Comedy': l10n.discoveryGenreComedy,
+        'Crime': l10n.discoveryGenreCrime,
+        'Documentary': l10n.discoveryGenreDocumentary,
+        'Drama': l10n.discoveryGenreDrama,
+        'Fantasy': l10n.discoveryGenreFantasy,
+        'History': l10n.discoveryGenreHistory,
+        'Family': l10n.discoveryGenreFamily,
+        'Music': l10n.discoveryGenreMusic,
+        'Mystery': l10n.discoveryGenreMystery,
+        'Romance': l10n.discoveryGenreRomance,
+        'SciFi': l10n.discoveryGenreSciFi,
+        'Thriller': l10n.discoveryGenreThriller,
+        'War': l10n.discoveryGenreWar,
+        'Western': l10n.discoveryGenreWestern,
+        'Horror': l10n.discoveryGenreHorror,
+      };
 
-  void _cycleYear() {
-    final opts = DiscoveryFilters.yearOptions;
-    var idx = opts.indexWhere((o) => o.$1 == _filters.yearFrom && o.$2 == _filters.yearTo);
-    if (idx < 0) idx = 0;
-    final next = opts[(idx + 1) % opts.length];
-    setState(() => _filters = DiscoveryFilters(
-          mediaType: _filters.mediaType,
-          sort: _filters.sort,
-          yearFrom: next.$1,
-          yearTo: next.$2,
-          genre: _filters.genre,
-        ));
-    _resetFeed();
-  }
-
-  void _cycleGenre() {
-    final opts = DiscoveryFilters.genreOptions;
-    var idx = opts.indexWhere((o) => o.$1 == (_filters.genre ?? 0));
-    if (idx < 0) idx = 0;
-    final next = opts[(idx + 1) % opts.length];
-    setState(() => _filters = DiscoveryFilters(
-          mediaType: _filters.mediaType,
-          sort: _filters.sort,
-          yearFrom: _filters.yearFrom,
-          yearTo: _filters.yearTo,
-          genre: next.$1,
-        ));
-    _resetFeed();
-  }
-
-  void _clearFilters() {
-    setState(() => _filters = const DiscoveryFilters());
-    _resetFeed();
-  }
-
-  Future<void> _toggleWatch(SeerrMedia m) async {
-    final s = _services!;
-    if (!s.profiles.available) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.discoveryNoWatchlist)));
-      }
-      return;
-    }
-    await s.profiles.toggle(m);
-    if (mounted) setState(() {});
-  }
-
+  /// A card click opens the *detail* page, never starts playback directly.
+  /// Library match → Emby detail page; otherwise → Seerr detail page. The user
+  /// then presses play / picks an episode inside that page.
   void _openCard(SeerrMedia m) {
     final item = _owned[m.key];
     if (item != null) {
-      playItem(context, item);
+      openItem(context, item);
     } else {
-      _toggleWatch(m);
+      openRequest(context, m);
     }
   }
 
@@ -251,7 +243,11 @@ class _DiscoverPageState extends State<DiscoverPage> {
     final cards = feed.items.toList();
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      // Header row — single, unclipped top padding, no overlap with chips.
+      // Fixed header block. Painted with an opaque background and elevated so
+      // scrolled / focus-scaled cards can never bleed through into the labels.
+      Container(
+        color: Zc.background,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       Padding(
         padding: const EdgeInsets.only(left: contentLeft, top: 28, right: 120, bottom: 6),
         child: Row(children: [
@@ -282,17 +278,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
             ),
           ),
           const SizedBox(width: 14),
-          _filterChip(_mediaTypeLabel(l10n), _cycleMediaType),
-          const SizedBox(width: 10),
-          _filterChip(_sortLabel(l10n), _cycleSort),
-          const SizedBox(width: 10),
-          _filterChip(_yearLabel(l10n), _cycleYear),
-          const SizedBox(width: 10),
-          _filterChip(_genreLabel(l10n), _cycleGenre),
-          if (_filters.isActive) ...[
-            const SizedBox(width: 10),
-            _filterChip(l10n.discoveryClearFilters, _clearFilters),
-          ],
+          _filterTrigger(l10n),
         ]),
       ),
       // Category chips.
@@ -304,6 +290,8 @@ class _DiscoverPageState extends State<DiscoverPage> {
             for (final c in DiscoveryCategory.values) _chip(c, l10n),
           ]),
         ),
+      ),
+        ]),
       ),
       Expanded(
         child: !source.available
@@ -321,7 +309,10 @@ class _DiscoverPageState extends State<DiscoverPage> {
                   debugLabel: 'discovery-grid:${_selected.id}',
                   child: GridView.builder(
                     controller: _grid,
-                    clipBehavior: Clip.none,
+                    // hardEdge (not none): without clipping, scrolled-out and
+                    // focus-scaled cards painted upward over the fixed header,
+                    // which is the overlap bug the user reported.
+                    clipBehavior: Clip.hardEdge,
                     padding: const EdgeInsets.fromLTRB(contentLeft, 8, 120, 160),
                     gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                       crossAxisCount: columns,
@@ -366,59 +357,106 @@ class _DiscoverPageState extends State<DiscoverPage> {
     );
   }
 
-  String _mediaTypeLabel(L10n l10n) => switch (_filters.mediaType) {
-        FilterMediaType.all => l10n.discoveryFilterAll,
+  /// One trigger chip summarising the active filter state; tapping it opens
+  /// the detailed filter panel. Replaces the old four cycle-chips.
+  Widget _filterTrigger(L10n l10n) {
+    final parts = <String>[];
+    if (_filters.mediaType != FilterMediaType.all) {
+      parts.add(switch (_filters.mediaType) {
         FilterMediaType.movie => l10n.discoveryFilterMovie,
         FilterMediaType.tv => l10n.discoveryFilterTv,
-      };
-
-  String _sortLabel(L10n l10n) => switch (_filters.sort) {
-        FilterSort.hot => l10n.discoverySortHot,
+        FilterMediaType.all => '',
+      });
+    }
+    if (_filters.sort != FilterSort.hot) {
+      parts.add(switch (_filters.sort) {
         FilterSort.rating => l10n.discoverySortRating,
         FilterSort.latest => l10n.discoverySortLatest,
-      };
-
-  String _yearLabel(L10n l10n) {
-    final o = DiscoveryFilters.yearOptions.firstWhere(
+        FilterSort.hot => '',
+      });
+    }
+    final year = DiscoveryFilters.yearOptions.firstWhere(
       (e) => e.$1 == _filters.yearFrom && e.$2 == _filters.yearTo,
       orElse: () => DiscoveryFilters.yearOptions.first,
     );
-    return switch (o.$3) {
-      'All' => l10n.discoveryFilterAll,
-      'Y2020s' => l10n.discoveryYear2020,
-      'Y2010s' => l10n.discoveryYear2010,
-      'Y2000s' => l10n.discoveryYear2000,
-      _ => l10n.discoveryYearOld,
-    };
-  }
-
-  String _genreLabel(L10n l10n) {
-    final id = _filters.genre ?? 0;
-    return switch (id) {
-      0 => l10n.discoveryFilterAll,
-      28 => l10n.discoveryGenreAction,
-      35 => l10n.discoveryGenreComedy,
-      878 => l10n.discoveryGenreSciFi,
-      16 => l10n.discoveryGenreAnimation,
-      9648 => l10n.discoveryGenreMystery,
-      _ => l10n.discoveryGenreHorror,
-    };
-  }
-
-  Widget _filterChip(String label, VoidCallback onSelect) {
+    if (year.$3 != 'All') {
+      parts.add(switch (year.$3) {
+        'Y2020s' => l10n.discoveryYear2020,
+        'Y2010s' => l10n.discoveryYear2010,
+        'Y2000s' => l10n.discoveryYear2000,
+        _ => l10n.discoveryYearOld,
+      });
+    }
+    if (_filters.region != null && _filters.region!.isNotEmpty) {
+      parts.add(switch (_filters.region) {
+        'zh' => l10n.discoveryRegionChinese,
+        'en' => l10n.discoveryRegionEnglish,
+        'ja' => l10n.discoveryRegionJapanese,
+        'ko' => l10n.discoveryRegionKorean,
+        'fr' => l10n.discoveryRegionFrench,
+        'de' => l10n.discoveryRegionGerman,
+        'es' => l10n.discoveryRegionSpanish,
+        'it' => l10n.discoveryRegionItalian,
+        'ru' => l10n.discoveryRegionRussian,
+        'th' => l10n.discoveryRegionThai,
+        'hi' => l10n.discoveryRegionHindi,
+        _ => _filters.region!,
+      });
+    }
+    final genre = _filters.genre ?? 0;
+    if (genre != 0) parts.add(_genreLabel(l10n, genre));
+    final label = parts.isEmpty ? l10n.discoveryFilterTitle : parts.join(' · ');
     return TvFocusable(
-      onSelect: onSelect,
+      onSelect: _openFilters,
       builder: (context, focused) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
         decoration: BoxDecoration(
-          color: focused ? Zc.surface : Zc.background,
+          color: _filters.isActive ? Zc.surface : Zc.background,
           borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: focused ? Zc.request : Zc.outline),
+          border: Border.all(color: focused || _filters.isActive ? Zc.request : Zc.outline),
         ),
-        child: Text(label, style: Zt.label.copyWith(color: focused ? Zc.text : Zc.textMuted)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(
+            _filters.isActive ? Icons.filter_alt_rounded : Icons.filter_alt_outlined_rounded,
+            size: 26,
+            color: focused ? Zc.text : (_filters.isActive ? Zc.request : Zc.textMuted),
+          ),
+          const SizedBox(width: 10),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Zt.label.copyWith(color: focused ? Zc.text : Zc.textMuted),
+            ),
+          ),
+        ]),
       ),
     );
   }
+
+  String _genreLabel(L10n l10n, int id) => switch (id) {
+        28 => l10n.discoveryGenreAction,
+        12 => l10n.discoveryGenreAdventure,
+        16 => l10n.discoveryGenreAnimation,
+        35 => l10n.discoveryGenreComedy,
+        80 => l10n.discoveryGenreCrime,
+        99 => l10n.discoveryGenreDocumentary,
+        18 => l10n.discoveryGenreDrama,
+        14 => l10n.discoveryGenreFantasy,
+        36 => l10n.discoveryGenreHistory,
+        27 => l10n.discoveryGenreHorror,
+        10751 => l10n.discoveryGenreFamily,
+        10402 => l10n.discoveryGenreMusic,
+        9648 => l10n.discoveryGenreMystery,
+        10749 => l10n.discoveryGenreRomance,
+        878 => l10n.discoveryGenreSciFi,
+        53 => l10n.discoveryGenreThriller,
+        10752 => l10n.discoveryGenreWar,
+        37 => l10n.discoveryGenreWestern,
+        _ => l10n.discoveryFilterAll,
+      };
 
   Widget _chip(DiscoveryCategory category, L10n l10n) {
     final selected = category == _selected;

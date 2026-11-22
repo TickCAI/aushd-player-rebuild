@@ -49,6 +49,7 @@ final class DiscoveryFilters {
     this.yearFrom,
     this.yearTo,
     this.genre,
+    this.region,
   });
 
   final FilterMediaType mediaType;
@@ -59,34 +60,71 @@ final class DiscoveryFilters {
   /// TMDB genre id (0 == any). See [genreOptions].
   final int? genre;
 
+  /// TMDB original-language code (e.g. `zh`, `en`, `ja`), or null for any
+  /// region. Serves as the discovery page's "地区" (region) dimension: TMDB's
+  /// discover endpoint filters it server-side via `with_original_language`,
+  /// and search results / Seerr fallbacks are filtered client-side.
+  final String? region;
+
   bool get isActive => mediaType != FilterMediaType.all ||
       sort != FilterSort.hot ||
       yearFrom != null ||
       yearTo != null ||
-      (genre != null && genre != 0);
+      (genre != null && genre != 0) ||
+      (region != null && region!.isNotEmpty);
 
   /// Stable key so a filter change gets a fresh feed instead of reusing pages
   /// fetched under different criteria.
-  String get signature => '${mediaType.name}|${sort.name}|$yearFrom|$yearTo|$genre';
+  String get signature => '${mediaType.name}|${sort.name}|$yearFrom|$yearTo|$genre|$region';
 
-  /// (id, l10n suffix) pairs for the genre filter chip cycle.
+  /// TMDB genre ids with an l10n suffix, listed in the filter panel. Covers
+  /// the common movie + TV genres so "影片分类" is a real, detailed list.
   static const genreOptions = <(int, String)>[
     (0, 'All'),
     (28, 'Action'),
-    (35, 'Comedy'),
-    (878, 'SciFi'),
+    (12, 'Adventure'),
     (16, 'Animation'),
-    (9648, 'Mystery'),
+    (35, 'Comedy'),
+    (80, 'Crime'),
+    (99, 'Documentary'),
+    (18, 'Drama'),
+    (14, 'Fantasy'),
+    (36, 'History'),
     (27, 'Horror'),
+    (10751, 'Family'),
+    (10402, 'Music'),
+    (9648, 'Mystery'),
+    (10749, 'Romance'),
+    (878, 'SciFi'),
+    (53, 'Thriller'),
+    (10752, 'War'),
+    (37, 'Western'),
   ];
 
-  /// (from, to, l10n suffix) triples for the year filter chip cycle.
+  /// (from, to, l10n suffix) triples for the year filter list.
   static const yearOptions = <(int?, int?, String)>[
     (null, null, 'All'),
     (2020, null, 'Y2020s'),
     (2010, 2019, 'Y2010s'),
     (2000, 2009, 'Y2000s'),
     (null, 1999, 'YOld'),
+  ];
+
+  /// (language code, l10n suffix) pairs for the "地区" (region) filter list.
+  /// TMDB treats this as the original language of a title.
+  static const regionOptions = <(String?, String)>[
+    (null, 'All'),
+    ('zh', 'Chinese'),
+    ('en', 'English'),
+    ('ja', 'Japanese'),
+    ('ko', 'Korean'),
+    ('fr', 'French'),
+    ('de', 'German'),
+    ('es', 'Spanish'),
+    ('it', 'Italian'),
+    ('ru', 'Russian'),
+    ('th', 'Thai'),
+    ('hi', 'Hindi'),
   ];
 }
 
@@ -109,8 +147,9 @@ final class DiscoverySource {
   bool get available => tmdb != null || seerr != null;
 
   /// Fetch one page. When [filters] is active the category query is replaced
-  /// by a single, filter-aware TMDB discover call so the four filter dimensions
-  /// (type / sort / year / genre) behave consistently across all categories.
+  /// by a single, filter-aware TMDB discover call so all filter dimensions
+  /// (type / sort / year / genre / region) behave consistently across every
+  /// category.
   Future<List<SeerrMedia>> fetch(DiscoveryCategory category, {
     required int page,
     DiscoveryFilters? filters,
@@ -154,6 +193,7 @@ final class DiscoverySource {
     if (f.yearFrom != null) extra['$yearKey.gte'] = '${f.yearFrom}-01-01';
     if (f.yearTo != null) extra['$yearKey.lte'] = '${f.yearTo}-12-31';
     if (f.genre != null && f.genre! > 0) extra['with_genres'] = '${f.genre}';
+    if (f.region != null && f.region!.isNotEmpty) extra['with_original_language'] = f.region!;
     final sortBy = switch (f.sort) {
       FilterSort.rating => 'vote_average.desc',
       FilterSort.latest => '$yearKey.desc',
@@ -178,7 +218,10 @@ final class DiscoverySource {
                 (f.mediaType == FilterMediaType.movie) == !m.isTv) &&
             (f.genre == null || f.genre == 0 || m.genreIds.contains(f.genre)) &&
             (f.yearFrom == null || (m.year ?? 0) >= f.yearFrom!) &&
-            (f.yearTo == null || (m.year ?? 9999) <= f.yearTo!))
+            (f.yearTo == null || (m.year ?? 9999) <= f.yearTo!) &&
+            (f.region == null ||
+                f.region!.isEmpty ||
+                (m.originalLanguage?.isNotEmpty == true && m.originalLanguage == f.region)))
           m,
     ];
   }

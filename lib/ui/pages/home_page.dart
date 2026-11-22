@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../app/app_services.dart';
 import '../../core/emby/models/emby_item.dart';
 import '../../data/catalog_api.dart';
+import '../../data/discovery_feed.dart';
 import '../../data/recommendations.dart';
 import '../../data/seerr_api.dart';
 import '../../data/smart_list.dart';
@@ -284,6 +285,30 @@ class _HomePageState extends State<HomePage> {
     }, style: style, recommends: false, smartSpec: spec);
   }
 
+  /// A home row backed by the *real* discovery feed (TMDB / Seerr), per the
+  /// user's redesign: 热门趋势 / 热门剧集 / 本周推荐 / 为你推荐 now pull from
+  /// the same source as the Discover page instead of re-slicing the local
+  /// library. Titles that exist in the user's library are matched by TMDB id
+  /// and become EmbyItems, so a click opens the Emby detail page; the rest
+  /// stay SeerrMedia and open the Seerr detail page. Neither plays directly.
+  /// When no discovery source is configured the row silently hides itself.
+  _Row _discoveryRow(AppServices s, DiscoveryCategory category, String Function(L10n) title,
+      {CardStyle style = CardStyle.poster}) {
+    return _Row(title, () async {
+      final src = DiscoverySource(tmdb: s.tmdb, seerr: s.seerr, language: s.recommender.language);
+      if (!src.available) return const <Object>[];
+      try {
+        final page = await src.fetch(category, page: 1);
+        // Map library hits to EmbyItem so their cards open the Emby detail
+        // page (matching the Discover page's two-system behaviour).
+        return await s.recommender.resolve(page.take(20).toList());
+      } catch (e) {
+        debugPrint('[home] discovery $category: $e');
+        return const <Object>[];
+      }
+    }, style: style, recommends: false);
+  }
+
   Future<List<TitleTag>> _tags(AppServices s) => _tasteTags ??= () async {
         final tags = s.titleTags;
         if (tags == null) return const <TitleTag>[];
@@ -319,29 +344,22 @@ class _HomePageState extends State<HomePage> {
 
   List<_Row> _buildRows(AppServices s) {
     final c = s.catalog;
-    final seerr = s.seerr;
-    final r = s.recommender;
     Future<MixedItems> items(Future<ItemPage> page) async => (await page).items;
 
-    // Smart shelves (§3.1 B/C/F zones). Declarative specs live in
-    // `lib/data/smart_list.dart`; a shelf below its minItems is hidden by the
-    // resolver, so no empty rows are produced here.
+    // Smart shelves that stay library-backed (§3.1 B/C zones). Declarative
+    // specs live in `lib/data/smart_list.dart`; a shelf below its minItems is
+    // hidden by the resolver, so no empty rows are produced here.
     final smart = <_Row>[
       _smartRow(s, SmartSpec.thisWeek, (l) => l.smartThisWeek,
           style: CardStyle.landscape),
-      _smartRow(s, SmartSpec.classics, (l) => l.smartClassics),
       _smartRow(s, SmartSpec.fresh, (l) => l.smartFresh),
       _smartRow(s, SmartSpec.gems, (l) => l.smartGems),
-      _smartRow(s, SmartSpec.oneEp, (l) => l.smartOneEp,
-          style: CardStyle.landscape),
-      _smartRow(s, SmartSpec.picks, (l) => l.smartPicks,
-          style: CardStyle.spotlight),
     ];
 
-    // Six zones (§3.1), ≤12 rows, no duplicate titles. The old ~30-row
-    // recommendation churn (because/tag/starring/directed/genre variants) is
-    // replaced by the six declarative smart shelves; Seerr-only rows stay
-    // gated so a plain Emby install never sees a dead row.
+    // Six zones (§3.1), ≤12 rows, no duplicate titles. Per the user's
+    // redesign, 热门趋势 / 热门剧集 / 本周推荐 / 为你推荐 are now pulled from
+    // the real discovery feed (TMDB / Seerr) instead of re-slicing the local
+    // library; clicking their cards opens a detail page, never plays directly.
     return [
       // A 续看区
       _Row((l) => l.continueWatching, () => c.continueWatching(), kind: _Kind.continueWatching, recommends: false),
@@ -349,22 +367,23 @@ class _HomePageState extends State<HomePage> {
       _Row((l) => l.myLibraries, () => _libraryTiles(s), kind: _Kind.libraries, style: CardStyle.spotlight, recommends: false),
       // B 更新区
       smart[0], // 本周更新
-      smart[4], // 一集入坑
+      _discoveryRow(s, DiscoveryCategory.trending, (l) => l.homeTrending,
+          style: CardStyle.ranked), // 热门趋势（本周）
       // C 榜单区
-      smart[1], // 高分经典
-      smart[2], // 新片速递
-      smart[3], // 冷门佳作
-      if (seerr != null)
-        _Row((l) => l.trendingThisWeek, () => r.mixed((p) => seerr.trending(page: p, timeWindow: 'week'), limit: 10),
-            style: CardStyle.ranked),
+      _discoveryRow(s, DiscoveryCategory.popularShows, (l) => l.homePopularShows,
+          style: CardStyle.landscape), // 热门剧集
+      smart[1], // 新片速递
+      smart[2], // 冷门佳作
       // E 片单区
       _myListRow = _Row((l) => l.myList, s.myList, recommends: false),
       _Row((l) => l.yourFavorites,
           () => items(c.query(types: ['Movie', 'Series'], filters: 'IsFavorite', sortBy: 'Random', limit: 30)),
           style: CardStyle.landscape, recommends: false),
-      // F 推荐区 (algorithm outlet, sunk to the bottom)
-      smart[5], // 本周推荐
-      _Row((l) => l.recommendedForYou, () => _forYou(s), style: CardStyle.spotlight),
+      // F 推荐区 (discovery-backed, sunk to the bottom)
+      _discoveryRow(s, DiscoveryCategory.todayPicks, (l) => l.smartPicks,
+          style: CardStyle.spotlight), // 本周推荐
+      _discoveryRow(s, DiscoveryCategory.trending, (l) => l.recommendedForYou,
+          style: CardStyle.poster), // 为你推荐
     ];
   }
 
@@ -475,19 +494,6 @@ class _HomePageState extends State<HomePage> {
           types: ['Movie', 'Series'], genres: [genre], filters: 'IsUnplayed', sortBy: 'Random', minCommunityRating: 6.5, limit: 30);
       return page.items;
     }, style: style);
-  }
-
-  Future<MixedItems> _forYou(AppServices s) async {
-    final genres = (await _profile(s)).genres.take(3).map((g) => g.genre).toList();
-    final page = await s.catalog.query(
-      types: ['Movie', 'Series'],
-      genres: genres.isEmpty ? null : genres,
-      filters: 'IsUnplayed',
-      sortBy: 'Random',
-      minCommunityRating: 7,
-      limit: 12,
-    );
-    return [for (final i in page.items) if (s.catalog.landscape(i) != null || s.catalog.backdrop(i) != null) i];
   }
 
   Future<MixedItems> _load(_Row row, {bool counted = false}) => _data.putIfAbsent(row, () async {

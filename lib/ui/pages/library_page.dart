@@ -64,10 +64,29 @@ enum _BrowseTab {
       };
 }
 
-/// The five facets the user approved. Values inside one facet combine with OR;
+/// The facets the user approved. Values inside one facet combine with OR;
 /// different facets combine with AND. 类型 (genre) reuses the existing toolbar
-/// selector, so the extra facet buttons here cover 出品方/年份/地区.
+/// selector, so the extra facet buttons here cover 流媒体/年份/地区.
 enum _Facet { studio, year, region }
+
+/// Mainstream streaming platforms, each with the studio-name fragments that
+/// identify it in an Emby/Jellyfin library (matched case-insensitively). The
+/// 流媒体 facet lists *these* — a fixed, curated set — instead of dumping every
+/// production company found in the library, which is what the user objected to
+/// ("一堆乱七八糟的出品方").
+const _streamingPlatforms = <(String, String, List<String>)>[
+  ('iqiyi', '爱奇艺', ['iqiyi', '爱奇艺']),
+  ('tencent', '腾讯视频', ['tencent', '腾讯']),
+  ('youku', '优酷', ['youku', '优酷']),
+  ('mango', '芒果TV', ['mango', '芒果']),
+  ('bilibili', '哔哩哔哩', ['bilibili', '哔哩', 'b站']),
+  ('netflix', 'Netflix', ['netflix', '奈飞', '网飞']),
+  ('disney', 'Disney+', ['disney', '迪士尼']),
+  ('hbo', 'HBO Max', ['hbo']),
+  ('prime', 'Prime Video', ['amazon', 'prime']),
+  ('apple', 'Apple TV+', ['apple']),
+  ('bbc', 'BBC', ['bbc']),
+];
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({super.key, required this.kind, this.view, this.onViewChanged});
@@ -163,21 +182,40 @@ class _LibraryPageState extends State<LibraryPage> {
     _reload();
   }
 
-  /// Distinct facet values seen so far, used to populate the pickers. Region
-  /// values are normalized to Chinese buckets through ContentZh.region.
-  /// Studios seen in the current library, ranked by frequency so the popular
-  /// production houses surface first. The picker caps the long tail but keeps
-  /// search, so a rare studio is still reachable.
+  /// Streaming platforms actually present in the current library, ranked by
+  /// how many titles match each. Only the curated mainstream set is offered
+  /// (never every production company), and a platform is shown only if at
+  /// least one loaded title matches its studio-name fragments.
   Map<String, String> _studioOptions() {
     final counts = <String, int>{};
-    for (final item in _items) {
-      for (final s in item.studios) {
-        counts[s] = (counts[s] ?? 0) + 1;
+    for (final (key, _, frags) in _streamingPlatforms) {
+      var n = 0;
+      for (final item in _items) {
+        if (_matchesPlatform(item, frags)) n++;
       }
+      if (n > 0) counts[key] = n;
     }
     final sorted = counts.keys.toList()..sort((a, b) => counts[b]!.compareTo(counts[a]!));
-    return {for (final s in sorted) s: s};
+    return {for (final k in sorted) k: _platformLabel(k)};
   }
+
+  static bool _matchesPlatform(EmbyItem item, List<String> fragments) {
+    for (final s in item.studios) {
+      final low = s.toLowerCase();
+      for (final f in fragments) {
+        if (low.contains(f)) return true;
+      }
+    }
+    return false;
+  }
+
+  static String _platformLabel(String key) {
+    for (final (k, label, _) in _streamingPlatforms) {
+      if (k == key) return label;
+    }
+    return key;
+  }
+
   Map<int, String> _yearOptions() => {
         for (final y in _distinct(_items.map((i) => i.premiereDate?.year))) y: '$y',
       };
@@ -189,8 +227,9 @@ class _LibraryPageState extends State<LibraryPage> {
 
   /// Local fallback filter for facets a server may ignore, plus the 即将上映
   /// tab's "premieres after today" rule. Empty facet selection means "no
-  /// constraint". Sending facet values to `query` too keeps the result set
-  /// small on servers that support them.
+  /// constraint". Streaming is matched here (fuzzy studio-name fragments)
+  /// rather than server-side, because Emby's Studios filter is exact and
+  /// cannot express "any title whose studio contains Netflix/奈飞/…".
   List<EmbyItem> _filterLocally(List<EmbyItem> source) {
     final now = DateTime.now();
     final facetsActive = _studios.isNotEmpty || _years.isNotEmpty || _regions.isNotEmpty;
@@ -201,7 +240,10 @@ class _LibraryPageState extends State<LibraryPage> {
         final date = item.premiereDate;
         if (date == null || !date.isAfter(now)) return false;
       }
-      if (_studios.isNotEmpty && !item.studios.any(_studios.contains)) return false;
+      if (_studios.isNotEmpty &&
+          !_streamingPlatforms.any((p) => _studios.contains(p.$1) && _matchesPlatform(item, p.$3))) {
+        return false;
+      }
       if (_years.isNotEmpty) {
         final y = item.premiereDate?.year;
         if (y == null || !_years.contains(y)) return false;
@@ -218,7 +260,7 @@ class _LibraryPageState extends State<LibraryPage> {
     final picked = await showMultiSelectSidePanel<T>(
       context,
       title: switch (facet) {
-        _Facet.studio => '出品方',
+        _Facet.studio => '流媒体',
         _Facet.year => '年份',
         _Facet.region => '地区',
       },
@@ -226,8 +268,7 @@ class _LibraryPageState extends State<LibraryPage> {
         for (final e in options.entries)
           PanelOption<T>(value: e.key, title: e.value, selected: selected.contains(e.key)),
       ],
-      searchHint: facet == _Facet.studio ? '搜索出品方' : null,
-      initialLimit: facet == _Facet.studio ? 12 : null,
+      searchHint: facet == _Facet.studio ? '搜索流媒体平台' : null,
     );
     if (picked == null) return;
     setState(() {
@@ -328,7 +369,10 @@ class _LibraryPageState extends State<LibraryPage> {
             start: _fetched,
             limit: _pageSize,
             genres: _genre == null ? null : [_genre!],
-            studios: _studios.isEmpty ? null : _studios.toList(),
+            // Streaming is a curated, fuzzy platform match done locally below
+            // (`_filterLocally`); Emby's Studios filter is exact and would
+            // return nothing for a platform key like "netflix", so it is not
+            // sent to the server.
             productionLocations: _regions.isEmpty ? null : _regions.toList(),
             filters: switch (_watched) {
               _Watched.all => null,
@@ -627,7 +671,7 @@ class _LibraryPageState extends State<LibraryPage> {
                       scrollDirection: Axis.horizontal,
                       child: Row(children: [
                         TvButton(
-                          label: _studios.isEmpty ? '出品方' : '出品方·${_studios.length}',
+                          label: _studios.isEmpty ? '流媒体' : '流媒体·${_studios.length}',
                           icon: Icons.business_rounded,
                           onSelect: () => _pickFacet(_Facet.studio, _studioOptions(), _studios),
                         ),
