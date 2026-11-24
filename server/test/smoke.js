@@ -140,6 +140,68 @@ child.stderr.on('data', (d) => process.stderr.write(d))
   r = await fetch(`${BASE}/api/admin/codes`, { headers: admin })
   check('admin codes list', r.status === 200 && (await r.json()).codes.length === 1)
 
+  // --- Hot-reload config ---
+  r = await fetch(`${BASE}/api/config?platform=windows&channel=stable`)
+  check('config absent returns 204', r.status === 204)
+
+  r = await fetch(`${BASE}/api/config?platform=bogus`)
+  check('config bad platform rejected', r.status === 400)
+
+  r = await fetch(`${BASE}/api/admin/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ scope: 'default', version: 3 }),
+  })
+  check('admin config rejects missing token', r.status === 401)
+
+  r = await fetch(`${BASE}/api/admin/config`, {
+    method: 'POST',
+    headers: admin,
+    body: JSON.stringify({
+      scope: 'default',
+      config: {
+        version: 3,
+        homeRows: ['continueWatching', 'trending', 'popularShows'],
+        featureFlags: { danmaku: true },
+        announcements: [{ id: 'a1', text: 'Hello' }],
+      },
+    }),
+  })
+  const saved = await r.json()
+  check('admin config upsert', r.status === 200 && saved.ok === true && saved.version === 3)
+
+  r = await fetch(`${BASE}/api/config?platform=windows&channel=stable`)
+  const config = await r.json()
+  check('config returns signed doc', r.status === 200 && typeof config.signature === 'string')
+  check('config version', config.version === 3)
+  check('config homeRows', Array.isArray(config.homeRows) && config.homeRows[1] === 'trending')
+  check('config featureFlags deep-merged', config.featureFlags.danmaku === true)
+  check('config announcements', config.announcements.length === 1)
+
+  // signature must be stable and derived from the body (tamper -> mismatch)
+  r = await fetch(`${BASE}/api/config?platform=windows&channel=stable&tag=3`)
+  check('config tag unchanged returns 204', r.status === 204)
+
+  // platform override overlays defaults
+  r = await fetch(`${BASE}/api/admin/config`, {
+    method: 'POST',
+    headers: admin,
+    body: JSON.stringify({
+      scope: 'windows:stable',
+      config: { version: 4, featureFlags: { openlist: true } },
+    }),
+  })
+  check('admin config platform override', r.status === 200)
+
+  r = await fetch(`${BASE}/api/config?platform=windows&channel=stable`)
+  const override = await r.json()
+  check('config override version wins', override.version === 4)
+  check('config override keeps default homeRows', Array.isArray(override.homeRows) && override.homeRows.length === 3)
+  check('config override merges feature flags', override.featureFlags.danmaku === true && override.featureFlags.openlist === true)
+
+  r = await fetch(`${BASE}/api/admin/config`, { headers: admin })
+  check('admin config list', r.status === 200 && Object.keys((await r.json()).configs).length === 2)
+
   console.log(`\nPASS: ${passed} checks`)
 })()
   .catch((err) => {

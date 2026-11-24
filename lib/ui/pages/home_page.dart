@@ -44,7 +44,7 @@ enum _Kind {
 
 class _Row {
   _Row(this.title, this.load,
-      {this.style = CardStyle.poster, this.kind = _Kind.cards, this.recommends = true, this.smartSpec});
+      {this.style = CardStyle.poster, this.kind = _Kind.cards, this.recommends = true, this.smartSpec, this.id});
 
   String Function(L10n) title;
 
@@ -57,6 +57,9 @@ class _Row {
   /// Set for smart-shelf rows so the "More" affordance can open a filtered
   /// library view for the same spec (§3.2).
   final SmartSpec? smartSpec;
+
+  /// Stable id used by the signed hot-reload config to reorder home rows.
+  final String? id;
 }
 
 class HomePage extends StatefulWidget {
@@ -112,6 +115,7 @@ class _HomePageState extends State<HomePage> {
 
   AppServices? _services;
   String _pickedCollections = '';
+  int _configVersion = -1;
 
   _Row? _myListRow;
   String _myListKeys = '';
@@ -130,6 +134,7 @@ class _HomePageState extends State<HomePage> {
       _services!.libraryChanged.addListener(refresh);
       _services!.profiles.addListener(_onProfile);
       _pickedCollections = _collectionsKey(_services!);
+      _configVersion = _services!.configService.appliedVersion;
       _services!.addListener(_onServices);
     }
   }
@@ -140,9 +145,15 @@ class _HomePageState extends State<HomePage> {
   static String _collectionsKey(AppServices s) => [for (final (id, _) in _collections(s)) id].join(',');
 
   void _onServices() {
+    if (!mounted) return;
     final key = _collectionsKey(_services!);
-    if (key == _pickedCollections || !mounted) return;
+    final configVersion = _services!.configService.appliedVersion;
+    // Rebuild rows when either the user's collections or the signed hot-reload
+    // config version changed. Config arrives asynchronously at startup, so
+    // this is the path that applies a newly-downloaded row order.
+    if (key == _pickedCollections && configVersion == _configVersion) return;
     _pickedCollections = key;
+    _configVersion = configVersion;
     setState(() {
       _rows = _buildRows(_services!);
       _data.clear();
@@ -278,11 +289,11 @@ class _HomePageState extends State<HomePage> {
   /// Discovery content lives in its own space (DiscoverPage) and is never
   /// mixed into these library-backed shelves (§3.1 two-system separation).
   _Row _smartRow(AppServices s, SmartSpec spec, String Function(L10n) title,
-      {CardStyle style = CardStyle.poster}) {
+      {CardStyle style = CardStyle.poster, String? id}) {
     return _Row(title, () async {
       final resolver = SmartListResolver(s.catalog, await _profile(s));
       return resolver.resolve(spec);
-    }, style: style, recommends: false, smartSpec: spec);
+    }, style: style, recommends: false, smartSpec: spec, id: id);
   }
 
   /// A home row backed by the *real* discovery feed (TMDB / Seerr), per the
@@ -293,7 +304,7 @@ class _HomePageState extends State<HomePage> {
   /// stay SeerrMedia and open the Seerr detail page. Neither plays directly.
   /// When no discovery source is configured the row silently hides itself.
   _Row _discoveryRow(AppServices s, DiscoveryCategory category, String Function(L10n) title,
-      {CardStyle style = CardStyle.poster}) {
+      {CardStyle style = CardStyle.poster, String? id}) {
     return _Row(title, () async {
       final src = DiscoverySource(tmdb: s.tmdb, seerr: s.seerr, language: s.recommender.language);
       if (!src.available) return const <Object>[];
@@ -306,7 +317,7 @@ class _HomePageState extends State<HomePage> {
         debugPrint('[home] discovery $category: $e');
         return const <Object>[];
       }
-    }, style: style, recommends: false);
+    }, style: style, recommends: false, id: id);
   }
 
   Future<List<TitleTag>> _tags(AppServices s) => _tasteTags ??= () async {
@@ -351,40 +362,45 @@ class _HomePageState extends State<HomePage> {
     // hidden by the resolver, so no empty rows are produced here.
     final smart = <_Row>[
       _smartRow(s, SmartSpec.thisWeek, (l) => l.smartThisWeek,
-          style: CardStyle.landscape),
-      _smartRow(s, SmartSpec.fresh, (l) => l.smartFresh),
-      _smartRow(s, SmartSpec.gems, (l) => l.smartGems),
+          style: CardStyle.landscape, id: 'thisWeek'),
+      _smartRow(s, SmartSpec.fresh, (l) => l.smartFresh, id: 'fresh'),
+      _smartRow(s, SmartSpec.gems, (l) => l.smartGems, id: 'gems'),
     ];
 
     // Six zones (§3.1), ≤12 rows, no duplicate titles. Per the user's
     // redesign, 热门趋势 / 热门剧集 / 本周推荐 / 为你推荐 are now pulled from
     // the real discovery feed (TMDB / Seerr) instead of re-slicing the local
     // library; clicking their cards opens a detail page, never plays directly.
-    return [
+    final rows = [
       // A 续看区
-      _Row((l) => l.continueWatching, () => c.continueWatching(), kind: _Kind.continueWatching, recommends: false),
+      _Row((l) => l.continueWatching, () => c.continueWatching(),
+          kind: _Kind.continueWatching, recommends: false, id: 'continueWatching'),
       // D 分类区 (server libraries rendered as aligned landscape tiles)
-      _Row((l) => l.myLibraries, () => _libraryTiles(s), kind: _Kind.libraries, style: CardStyle.spotlight, recommends: false),
+      _Row((l) => l.myLibraries, () => _libraryTiles(s),
+          kind: _Kind.libraries, style: CardStyle.spotlight, recommends: false, id: 'myLibraries'),
       // B 更新区
       smart[0], // 本周更新
       _discoveryRow(s, DiscoveryCategory.trending, (l) => l.homeTrending,
-          style: CardStyle.ranked), // 热门趋势（本周）
+          style: CardStyle.ranked, id: 'homeTrending'), // 热门趋势（本周）
       // C 榜单区
       _discoveryRow(s, DiscoveryCategory.popularShows, (l) => l.homePopularShows,
-          style: CardStyle.landscape), // 热门剧集
+          style: CardStyle.landscape, id: 'homePopularShows'), // 热门剧集
       smart[1], // 新片速递
       smart[2], // 冷门佳作
       // E 片单区
-      _myListRow = _Row((l) => l.myList, s.myList, recommends: false),
+      _myListRow = _Row((l) => l.myList, s.myList, recommends: false, id: 'myList'),
       _Row((l) => l.yourFavorites,
           () => items(c.query(types: ['Movie', 'Series'], filters: 'IsFavorite', sortBy: 'Random', limit: 30)),
-          style: CardStyle.landscape, recommends: false),
+          style: CardStyle.landscape, recommends: false, id: 'yourFavorites'),
       // F 推荐区 (discovery-backed, sunk to the bottom)
       _discoveryRow(s, DiscoveryCategory.todayPicks, (l) => l.smartPicks,
-          style: CardStyle.spotlight), // 本周推荐
+          style: CardStyle.spotlight, id: 'smartPicks'), // 本周推荐
       _discoveryRow(s, DiscoveryCategory.trending, (l) => l.recommendedForYou,
-          style: CardStyle.poster), // 为你推荐
+          style: CardStyle.poster, id: 'recommendedForYou'), // 为你推荐
     ];
+    // Signed hot-reload config may reorder/omit rows. Unknown/missing ids are
+    // appended in their original order, so a partial remote list is safe.
+    return s.configService.applyRowOrder(rows, (r) => r.id ?? '');
   }
 
   static List<Object> _interleave(List<Object> a, List<Object> b) => [
