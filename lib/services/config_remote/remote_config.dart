@@ -104,7 +104,7 @@ final class RemoteConfig {
   }
 
   /// Recursively sort object keys — identical to the server's canonical form.
-  static Object _sorted(Object? v) {
+  static Object? _sorted(Object? v) {
     if (v is List) return [for (final e in v) _sorted(e)];
     if (v is Map) {
       final keys = v.keys.map((k) => '$k').toList()..sort();

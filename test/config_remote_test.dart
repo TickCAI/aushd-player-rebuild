@@ -2,16 +2,16 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:aushd_player/core/storage/local_store.dart';
-import 'package:aushd_player/services/config_remote/config_service.dart';
-import 'package:aushd_player/services/config_remote/remote_config.dart';
+import 'package:zerk_play/core/storage/local_store.dart';
+import 'package:zerk_play/services/config_remote/config_service.dart';
+import 'package:zerk_play/services/config_remote/remote_config.dart';
 
 void main() {
   const key = 'test-signing-key';
 
   Map<String, Object?> signedBody(Map<String, Object?> body) {
     final payload = Map<String, Object?>.from(body);
-    Object sort(Object? v) {
+    Object? sort(Object? v) {
       if (v is List) return [for (final e in v) sort(e)];
       if (v is Map) {
         final keys = v.keys.map((k) => '$k').toList()..sort();
