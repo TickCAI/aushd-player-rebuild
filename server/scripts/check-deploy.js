@@ -89,6 +89,19 @@ async function main() {
   }
 
   try {
+    const r = await call('/api/config?platform=windows&channel=stable')
+    if (r.status === 204 || r.status === 404) {
+      record(true, '配置热更接口 /api/config', `HTTP ${r.status}（尚未配置，属正常）`)
+    } else if (r.status === 200 && r.body && typeof r.body.signature === 'string') {
+      record(true, '配置热更接口 /api/config', `HTTP 200 · v${r.body.version} · 已签名`)
+    } else {
+      record(false, '配置热更接口 /api/config', `HTTP ${r.status}，响应缺少签名`)
+    }
+  } catch (e) {
+    record(false, '配置热更接口 /api/config', e.message)
+  }
+
+  try {
     const r = await call('/api/app/link', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

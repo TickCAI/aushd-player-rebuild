@@ -15,6 +15,13 @@ abstract final class Release {
       String.fromEnvironment('AUSHD_DIST_URL', defaultValue: '');
   static const hub = String.fromEnvironment('AUSHD_HUB_URL', defaultValue: '');
 
+  /// Shared HMAC key used to verify signed hot-reload config payloads. Must
+  /// match the server's CONFIG_SIGNING_KEY (or ADMIN_TOKEN fallback). Shipped
+  /// as a dart-define so each distribution can use its own secret; the default
+  /// mirrors the server dev fallback for local setups.
+  static const configSigningKey =
+      String.fromEnvironment('AUSHD_CONFIG_KEY', defaultValue: 'aushd-dev-config-key');
+
   /// Default TMDB API key so metadata works out of the box for this
   /// distribution. Users can override it in Settings; a build can replace it
   /// with --dart-define=AUSHD_TMDB_KEY=...

@@ -15,6 +15,8 @@
  *   POST /api/app/link                 upstream-compatible hub link protocol
  *   POST /api/app/logs                 client diagnostic log upload
  *   GET  /api/admin/logs               list uploaded log ids (Bearer token)
+ *   GET  /api/config                   signed hot-reload config (platform/channel/tag)
+ *   POST /api/admin/config             upsert hot-reload config (Bearer token)
  *
  * Zero runtime dependencies. Data lives in DATA_DIR as JSON files.
  */
@@ -32,6 +34,10 @@ const cfg = {
   adminToken: process.env.ADMIN_TOKEN || '',
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 8787}`).replace(/\/+$/, ''),
   maxBody: Number(process.env.MAX_BODY_BYTES || 2 * 1024 * 1024),
+  // HMAC key for hot-reload config signatures. Falls back to ADMIN_TOKEN so a
+  // single-secret deployment still works, then to a dev-only constant (a real
+  // deployment MUST set one of the two).
+  configKey: process.env.CONFIG_SIGNING_KEY || process.env.ADMIN_TOKEN || 'aushd-dev-config-key',
 }
 
 fs.mkdirSync(cfg.artifactsDir, { recursive: true })
@@ -42,6 +48,17 @@ const hits = new Map()
 const PLATFORMS = ['windows', 'linux', 'androidtv']
 const CHANNELS = ['stable', 'beta']
 const DEFAULT_FEATURES = { requests: false, together: false, profiles: false, redownload: false }
+
+// Hot-reload config: sensible defaults, overridable per (platform, channel).
+// Clients reject a response whose signature does not match the canonical body.
+const DEFAULT_CONFIG = {
+  version: 0,
+  homeRows: null, // null = client keeps its built-in row order
+  featureFlags: {},
+  announcements: [],
+  danmakuSources: [],
+  openlistPresets: [],
+}
 
 function json(res, status, obj, extra = {}) {
   const body = Buffer.from(JSON.stringify(obj))
@@ -216,6 +233,53 @@ function linkResponse(entry) {
       playlistGuideUrl: (entry.liveTv && entry.liveTv.playlistGuideUrl) || '',
     },
   }
+}
+
+/** Return the stored config document (map keyed by `${platform}:${channel}`, plus a '*' default). */
+function allConfigs() {
+  const c = store.read('config.json', {})
+  return c && typeof c === 'object' && !Array.isArray(c) ? c : {}
+}
+
+/** Resolve config for a platform+channel: default '*' overlaid by the specific entry. */
+function resolveConfig(platform, channel) {
+  const all = allConfigs()
+  const base = { ...DEFAULT_CONFIG, ...(all['*'] || {}) }
+  const specific = all[`${platform}:${channel}`] || all[platform] || {}
+  const merged = { ...base, ...specific }
+  // Deep-merge the object/array fields so a platform override need not repeat
+  // the whole document.
+  merged.featureFlags = { ...(base.featureFlags || {}), ...(specific.featureFlags || {}) }
+  for (const k of ['announcements', 'danmakuSources', 'openlistPresets']) {
+    if (specific[k] !== undefined) merged[k] = specific[k]
+    else merged[k] = base[k] || []
+  }
+  return merged
+}
+
+/** Canonical, stable JSON string used as the HMAC payload. */
+function canonicalConfig(doc) {
+  const { signature, ...body } = doc
+  // Recursively sort object keys for a deterministic signature.
+  const sort = (v) => {
+    if (Array.isArray(v)) return v.map(sort)
+    if (v && typeof v === 'object') {
+      const out = {}
+      Object.keys(v).sort().forEach((k) => { out[k] = sort(v[k]) })
+      return out
+    }
+    return v
+  }
+  return JSON.stringify(sort(body))
+}
+
+function signConfig(doc) {
+  return crypto.createHmac('sha256', cfg.configKey).update(canonicalConfig(doc)).digest('hex')
+}
+
+function configResponse(platform, channel) {
+  const doc = resolveConfig(platform, channel)
+  return { ...doc, signature: signConfig(doc) }
 }
 
 async function handle(req, res) {
@@ -435,6 +499,58 @@ async function handle(req, res) {
       ids = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => f.replace(/\.json$/, ''))
     } catch {}
     return json(res, 200, { logs: ids.slice(-100) })
+  }
+
+  if (p === '/api/config' && method === 'GET') {
+    const platform = (url.searchParams.get('platform') || '').trim()
+    const channel = (url.searchParams.get('channel') || 'stable').trim()
+    const tag = (url.searchParams.get('tag') || '').trim()
+    if (!PLATFORMS.includes(platform)) {
+      return fail(res, 400, 'bad-platform', `platform must be one of ${PLATFORMS.join(', ')}`)
+    }
+    if (!CHANNELS.includes(channel)) {
+      return fail(res, 400, 'bad-channel', `channel must be one of ${CHANNELS.join(', ')}`)
+    }
+    const all = allConfigs()
+    const hasAny = Object.keys(all).length > 0
+    if (!hasAny) return noContent(res)
+    const doc = configResponse(platform, channel)
+    // Client sends its currently-applied version in `tag`; nothing changed → 204.
+    if (tag && String(doc.version) === tag) return noContent(res)
+    return json(res, 200, doc)
+  }
+
+  if (p === '/api/admin/config' && method === 'POST') {
+    if (!isAdmin(req)) return fail(res, 401, 'unauthorized', 'A valid admin token is required.')
+    let body
+    try {
+      body = await readBody(req, cfg.maxBody)
+    } catch (err) {
+      return fail(res, err.status || 400, 'bad-body', err.message)
+    }
+    const scope = String(body.scope || '*').trim()
+    if (scope !== '*' && scope !== 'default' && !PLATFORMS.includes(scope) && !scope.includes(':')) {
+      return fail(res, 400, 'bad-scope', 'scope must be *, default, a platform, or platform:channel')
+    }
+    const key = scope === 'default' ? '*' : scope
+    const payload = body.config && typeof body.config === 'object' ? body.config : body
+    delete payload.scope
+    delete payload.signature
+    const version = Number(payload.version)
+    if (!Number.isFinite(version) || version < 0) return fail(res, 400, 'bad-version', 'version must be a non-negative number')
+    if (payload.homeRows !== undefined && !Array.isArray(payload.homeRows)) {
+      return fail(res, 400, 'bad-homeRows', 'homeRows must be an array')
+    }
+    const all = allConfigs()
+    all[key] = payload
+    store.write('config.json', all)
+    log('[admin] config saved', key, 'v' + version)
+    return json(res, 200, { ok: true, scope: key, version, signature: signConfig(resolveConfig('windows', 'stable')) })
+  }
+
+  if (p === '/api/admin/config' && method === 'GET') {
+    if (!isAdmin(req)) return fail(res, 401, 'unauthorized', 'A valid admin token is required.')
+    return json(res, 200, { configs: allConfigs() })
   }
 
   return fail(res, 404, 'not-found', 'No such endpoint.')

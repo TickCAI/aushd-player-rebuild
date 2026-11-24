@@ -21,10 +21,13 @@ import '../data/xtream/live_catalog.dart';
 import '../data/xtream/xtream.dart';
 import '../playback/emby_playback_api.dart';
 import '../playback/sync/watch_together.dart';
+import '../services/config_remote/config_service.dart';
+import '../services/config_remote/remote_config.dart';
 import '../services/janus/janus_service.dart';
 import '../ui/core/ui_sounds.dart';
 import 'app_settings.dart';
 import 'hub_link.dart';
+import 'release.dart';
 
 final class AppServices extends ChangeNotifier {
   AppServices._({
@@ -33,6 +36,7 @@ final class AppServices extends ChangeNotifier {
     required this.playback,
     required this.together,
     required this.profiles,
+    required this.configService,
     required this._settings,
   }) {
     var togetherAvailable = together.available;
@@ -61,6 +65,11 @@ final class AppServices extends ChangeNotifier {
   final WatchTogether together;
 
   final ProfileService profiles;
+
+  /// Signed hot-reload config. Null config = keep built-in behaviour.
+  final ConfigService configService;
+  RemoteConfig? get remoteConfig => configService.config;
+  bool get configAvailable => configService.available;
 
   AppSettings _settings;
   AppSettings get settings => _settings;
@@ -154,8 +163,18 @@ final class AppServices extends ChangeNotifier {
         device: Host.isAndroid ? 'Android TV' : Host.isLinux ? 'Linux' : 'Windows',
       ),
       profiles: ProfileService(janus: janus),
+      configService: ConfigService(
+        store: store,
+        baseUrl: Release.distributionConfigured ? Release.distributionApi : '',
+        channel: Release.channel,
+        signingKey: Release.configSigningKey,
+      ),
       settings: settings,
     );
+    // Best-effort: load last verified config, then refresh in background.
+    // Any failure keeps the built-in home layout — never blocks startup.
+    await services.configService.loadCached();
+    if (services.configAvailable) unawaited(services.refreshConfig());
     services._detectHub();
     if (janus.isAuthenticated) {
       unawaited(services.playback.registerCapabilities().catchError((Object e) {
@@ -179,6 +198,14 @@ final class AppServices extends ChangeNotifier {
 
   void checkHub() {
     if (HubLink.due) unawaited(refreshHub());
+  }
+
+  /// Re-check signed config; notifies listeners only when the version changes
+  /// so the home page can rebuild its rows. Best-effort, never throws.
+  Future<void> refreshConfig() async {
+    final before = configService.appliedVersion;
+    final cfg = await configService.refresh();
+    if (cfg != null && cfg.version != before) notifyListeners();
   }
 
   bool get liveTvAvailable => _settings.xtreamConfigured || playlist.configured;
