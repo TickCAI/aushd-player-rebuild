@@ -36,6 +36,7 @@ import '../widgets/subtitle_preview.dart';
 import '../widgets/update_dialog.dart';
 import '../widgets/value_slider.dart';
 import 'home_collections_page.dart';
+import 'storage_sources_page.dart';
 
 enum _Section {
   playback(Icons.play_circle_outline_rounded),
@@ -553,6 +554,13 @@ class _SettingsPageState extends State<SettingsPage> {
             title: l10n.phoneSetupTitle,
             icon: Icons.qr_code_2_rounded,
             onSelect: () => showRemoteSetupDialog(context),
+          ),
+          SettingActionRow(
+            title: l10n.storageSources,
+            subtitle: l10n.storageIntro,
+            icon: Icons.cloud_outlined,
+            onSelect: () => Navigator.of(context)
+                .push(tvRoute<void>(const StorageSourcesPage(), name: 'settings/storage-sources')),
           ),
           const SettingHeader('TMDB'),
           _intro(l10n.metadataIntro),

@@ -10,6 +10,7 @@ import '../core/emby/models/emby_item.dart';
 import '../core/emby/server_kind.dart';
 import '../data/catalog_api.dart';
 import '../data/metadata_localizer.dart';
+import '../data/mount/mount_service.dart';
 import '../data/recommendations.dart';
 import '../data/seerr_api.dart';
 import '../data/title_tags.dart';
@@ -37,6 +38,7 @@ final class AppServices extends ChangeNotifier {
     required this.together,
     required this.profiles,
     required this.configService,
+    required this.mountService,
     required this._settings,
   }) {
     var togetherAvailable = together.available;
@@ -70,6 +72,9 @@ final class AppServices extends ChangeNotifier {
   final ConfigService configService;
   RemoteConfig? get remoteConfig => configService.config;
   bool get configAvailable => configService.available;
+
+  /// Locally configured network storage sources (OpenList / WebDAV).
+  final MountService mountService;
 
   AppSettings _settings;
   AppSettings get settings => _settings;
@@ -169,12 +174,14 @@ final class AppServices extends ChangeNotifier {
         channel: Release.channel,
         signingKey: Release.configSigningKey,
       ),
+      mountService: MountService(store),
       settings: settings,
     );
     // Best-effort: load last verified config, then refresh in background.
     // Any failure keeps the built-in home layout — never blocks startup.
     await services.configService.loadCached();
     if (services.configAvailable) unawaited(services.refreshConfig());
+    await services.mountService.load();
     services._detectHub();
     if (janus.isAuthenticated) {
       unawaited(services.playback.registerCapabilities().catchError((Object e) {

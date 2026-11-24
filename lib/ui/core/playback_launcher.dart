@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../app/app_services.dart';
 import '../../core/emby/models/emby_item.dart';
+import '../../data/xtream/xtream.dart';
 import '../../l10n/l10n.dart';
 import '../../playback/live_session.dart';
 import '../../playback/platform_player.dart';
@@ -138,6 +139,45 @@ Future<PlaybackOutcome?> playItem(
     await _noteLaunchFailure(e);
     if (context.mounted) showToast(context, l10n.playbackFailedWith('$e'));
     return null;
+  } finally {
+    _setPlaying(false);
+    RenderGuard.markPlaybackFinished();
+  }
+}
+
+/// Play an arbitrary HTTP(S) direct URL (OpenList `/d`, WebDAV file, etc.).
+///
+/// Reuses the battle-tested [LiveSession] path with a single URL-bearing
+/// [LiveSource]: because the source has a non-null `url`, `_play()` loads it
+/// directly and never touches account/selection logic. A dummy server is
+/// supplied only to satisfy the constructor; it is never used on this path.
+Future<void> playDirectUrl(BuildContext context, String url, {required String title}) async {
+  if (!_acquireLaunchLock()) return;
+  _setPlaying(true);
+  final l10n = context.l10n;
+  final navigator = Navigator.of(context, rootNavigator: true);
+  try {
+    await TrailerPlayer.stopAll().timeout(const Duration(seconds: 5), onTimeout: () => Future<void>.value());
+    final settings = await PlayerSettings.load();
+    final services = AppServicesScope.read(context);
+    final session = LiveSession(
+      player: createPlayer(
+        navigator: navigator,
+        settings: settings,
+        acceptInvalidCertificates: services.settings.acceptInvalidCertificates,
+        l10n: l10n,
+      ),
+      server: XtreamServer('', const []),
+      title: title,
+      sources: [LiveSource(title, 0, url)],
+      settings: settings,
+      l10n: l10n,
+    );
+    await session.run(0);
+  } catch (e, stack) {
+    debugPrint('[playback] direct url failed: $e\n$stack');
+    await _noteLaunchFailure(e);
+    if (context.mounted) showToast(context, l10n.playbackFailedWith('$e'));
   } finally {
     _setPlaying(false);
     RenderGuard.markPlaybackFinished();
