@@ -42,15 +42,23 @@ double cardWidth(CardStyle style) => switch (style) {
       CardStyle.spotlight => spotlightWidth,
     };
 
+/// The watch-later pill a *discovery* card shows for a title that is not in
+/// the local library. Shared by the Discover page and the home discovery
+/// shelves so both read identically: 待播, or 已在待播 when bookmarked.
+(String label, Color color, IconData icon) discoveryStatus(L10n l10n, {required bool inList}) => inList
+    ? (l10n.discoveryInWatchlist, Zc.textMuted, Icons.check_circle_rounded)
+    : (l10n.discoveryWatchLater, Zc.request, Icons.bookmark_border_rounded);
+
 Widget mixedCard(
   BuildContext context,
   Object data, {
   required CardStyle style,
   int rank = 0,
   bool autofocus = false,
+  bool discovery = false,
   VoidCallback? onFocus,
 }) {
-  final card = _mixedCard(context, data, style: style, rank: rank, autofocus: autofocus, onFocus: onFocus);
+  final card = _mixedCard(context, data, style: style, rank: rank, autofocus: autofocus, discovery: discovery, onFocus: onFocus);
   final (width, height) = switch (style) {
     CardStyle.poster => (Zs.posterWidth, Zs.posterWidth * 1.5),
     CardStyle.landscape => (Zs.landscapeWidth, Zs.landscapeWidth * 9 / 16),
@@ -97,17 +105,36 @@ Widget _mixedCard(
   required CardStyle style,
   required int rank,
   required bool autofocus,
+  required bool discovery,
   VoidCallback? onFocus,
 }) {
   if (data is SeerrMedia) {
     void open() => openRequest(context, data);
+    // Discovery rows (Discover page + home discovery shelves) show the
+    // watch-later pill, never 求片. Owned titles were already resolved to
+    // EmbyItem upstream, so a SeerrMedia here is genuinely not in the library
+    // and a click opens its Seerr detail page (where the user can request).
+    final status = discovery
+        ? discoveryStatus(context.l10n, inList: AppServicesScope.read(context).profiles.inList(data))
+        : null;
+    final label = status?.$1;
+    final color = status?.$2;
+    final icon = status?.$3;
     return switch (style) {
-      CardStyle.poster => RequestPosterCard(media: data, autofocus: autofocus, onFocus: onFocus, onSelect: open),
+      CardStyle.poster => RequestPosterCard(
+          media: data, autofocus: autofocus, onFocus: onFocus, onSelect: open,
+          statusLabel: label, statusColor: color, statusIcon: icon),
       CardStyle.ranked => RankedCard(
           rank: rank,
-          child: RequestPosterCard(media: data, autofocus: autofocus, onFocus: onFocus, onSelect: open)),
-      CardStyle.landscape => RequestLandscapeCard(media: data, autofocus: autofocus, onFocus: onFocus, onSelect: open),
-      CardStyle.spotlight => SpotlightCard.request(data, autofocus: autofocus, onFocus: onFocus, onSelect: open),
+          child: RequestPosterCard(
+              media: data, autofocus: autofocus, onFocus: onFocus, onSelect: open,
+              statusLabel: label, statusColor: color, statusIcon: icon)),
+      CardStyle.landscape => RequestLandscapeCard(
+          media: data, autofocus: autofocus, onFocus: onFocus, onSelect: open,
+          statusLabel: label, statusColor: color),
+      CardStyle.spotlight => SpotlightCard.request(
+          data, autofocus: autofocus, onFocus: onFocus, onSelect: open,
+          statusLabel: label, statusColor: color),
     };
   }
   final item = data as EmbyItem;
@@ -178,6 +205,8 @@ class RequestLandscapeCard extends StatelessWidget {
     this.onFocus,
     this.autofocus = false,
     this.width = Zs.landscapeWidth,
+    this.statusLabel,
+    this.statusColor,
   });
 
   final SeerrMedia media;
@@ -186,11 +215,17 @@ class RequestLandscapeCard extends StatelessWidget {
   final bool autofocus;
   final double width;
 
+  /// Optional pill override (discovery rows show 待播 instead of 求片).
+  final String? statusLabel;
+  final Color? statusColor;
+
   @override
   Widget build(BuildContext context) => RequestStateBuilder(media: media, builder: _build);
 
   Widget _build(BuildContext context, Availability availability, ReleaseInfo? release) {
-    final (label, color) = requestStatusLabel(context.l10n, availability, release: release);
+    final (defaultLabel, defaultColor) = requestStatusLabel(context.l10n, availability, release: release);
+    final label = statusLabel ?? defaultLabel;
+    final color = statusColor ?? defaultColor;
     return TvFocusable(
       autofocus: autofocus,
       onSelect: onSelect,
@@ -249,6 +284,8 @@ class SpotlightCard extends StatelessWidget {
     this.meta = const [],
     this.overview,
     this.media,
+    this.statusLabel,
+    this.statusColor,
     this.onSelect,
     this.onFocus,
     this.autofocus = false,
@@ -269,13 +306,20 @@ class SpotlightCard extends StatelessWidget {
     );
   }
 
-  factory SpotlightCard.request(SeerrMedia m, {bool autofocus = false, VoidCallback? onFocus, VoidCallback? onSelect}) =>
+  factory SpotlightCard.request(SeerrMedia m,
+          {bool autofocus = false,
+          VoidCallback? onFocus,
+          VoidCallback? onSelect,
+          String? statusLabel,
+          Color? statusColor}) =>
       SpotlightCard(
         title: m.title,
         backdrop: m.backdrop() ?? m.poster(width: 780),
         meta: [m.year?.toString(), ContentZh.genres(m.genres.take(2))],
         overview: m.overview,
         media: m,
+        statusLabel: statusLabel,
+        statusColor: statusColor,
         autofocus: autofocus,
         onFocus: onFocus,
         onSelect: onSelect,
@@ -288,6 +332,10 @@ class SpotlightCard extends StatelessWidget {
   final String? overview;
 
   final SeerrMedia? media;
+
+  /// Optional pill override (discovery rows show 待播 instead of 求片).
+  final String? statusLabel;
+  final Color? statusColor;
   final VoidCallback? onSelect;
   final VoidCallback? onFocus;
   final bool autofocus;
@@ -330,8 +378,9 @@ class SpotlightCard extends StatelessWidget {
                 top: 16,
                 left: 16,
                 child: Row(children: [
-                  Pill(requestStatusLabel(context.l10n, req, release: release).$1,
-                      color: requestStatusLabel(context.l10n, req, release: release).$2, textColor: Zc.background),
+                  Pill(statusLabel ?? requestStatusLabel(context.l10n, req, release: release).$1,
+                      color: statusColor ?? requestStatusLabel(context.l10n, req, release: release).$2,
+                      textColor: Zc.background),
                   if (release?.notOut ?? false) ...[const SizedBox(width: 8), ReleasePill(release)],
                 ]),
               ),

@@ -136,5 +136,43 @@ void main() {
       expect(svc.enabled, isFalse);
       expect(svc.hasProviders, isFalse);
     });
+
+    test('user-added source enables the service on its own', () async {
+      final svc = DanmakuService();
+      expect(svc.hasProviders, isFalse);
+      final id = svc.addUserSource(name: 'My API', url: 'http://x/{tmdb}/{episode}');
+      expect(svc.hasProviders, isTrue);
+      expect(svc.enabled, isTrue, reason: 'adding a source turns danmaku on');
+      expect(svc.isUserSource(id), isTrue);
+      expect(svc.providerId, id);
+      expect(svc.providers.first.displayName, 'My API');
+    });
+
+    test('removeUserSource drops the last source and disables', () {
+      final svc = DanmakuService();
+      final id = svc.addUserSource(name: 'A', url: 'http://x/{tmdb}');
+      expect(svc.hasProviders, isTrue);
+      svc.removeUserSource(id);
+      expect(svc.hasProviders, isFalse);
+      expect(svc.enabled, isFalse);
+      expect(svc.isUserSource(id), isFalse);
+    });
+
+    test('config sources and user sources coexist', () {
+      final svc = DanmakuService();
+      svc.applyConfigSources([
+        {'id': 'cfg', 'name': 'Config', 'url': 'http://c/{tmdb}'},
+      ]);
+      final uid = svc.addUserSource(name: 'User', url: 'http://u/{tmdb}');
+      expect(svc.providers, hasLength(2));
+      expect(svc.isUserSource('cfg'), isFalse);
+      expect(svc.isUserSource(uid), isTrue);
+      // A later config refresh must not erase the user's own source.
+      svc.applyConfigSources([
+        {'id': 'cfg2', 'name': 'Config2', 'url': 'http://c2/{tmdb}'},
+      ]);
+      expect(svc.providers, hasLength(2));
+      expect(svc.isUserSource(uid), isTrue);
+    });
   });
 }

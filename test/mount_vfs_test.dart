@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:zerk_play/core/storage/local_store.dart';
+import 'package:zerk_play/data/mount/ftp_vfs.dart';
 import 'package:zerk_play/data/mount/mount_service.dart';
 import 'package:zerk_play/data/mount/openlist_vfs.dart';
 import 'package:zerk_play/data/mount/virtual_file_system.dart';
@@ -169,8 +170,53 @@ void main() {
       final svc = MountService(store);
       await svc.add(MountDefinition(id: 'o', kind: MountKind.openlist, name: 'O', baseUrl: 'https://a'));
       await svc.add(MountDefinition(id: 'w', kind: MountKind.webdav, name: 'W', baseUrl: 'https://b'));
+      await svc.add(MountDefinition(id: 'f', kind: MountKind.ftp, name: 'F', baseUrl: 'ftp://host:21/x'));
       expect(svc.vfsFor('o'), isA<OpenListVfs>());
       expect(svc.vfsFor('w'), isA<WebDavVfs>());
+      expect(svc.vfsFor('f'), isA<FtpVfs>());
+    });
+
+    test('protocol dropdown lists cloud brands as openlist presets', () {
+      final brands = ProtocolPreset.all.where((p) => p.label != 'OpenList / AList').toList();
+      expect(brands, isNotEmpty);
+      for (final p in brands) {
+        expect(p.kind, MountKind.openlist,
+            reason: '${p.label} must bridge through OpenList');
+      }
+      expect(ProtocolPreset.all.any((p) => p.kind == MountKind.ftp), isTrue);
+      expect(ProtocolPreset.all.any((p) => p.kind == MountKind.webdav), isTrue);
+    });
+  });
+
+  group('OpenListVfs.authenticate', () {
+    test('extracts the bearer token from a login response', () async {
+      final client = MockClient((req) async {
+        expect(req.url.path, '/api/auth/login');
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        expect(body['username'], 'alice');
+        expect(body['password'], 'secret');
+        return http.Response(
+            jsonEncode({'code': 200, 'data': {'token': 'tok-123'}}), 200);
+      });
+      final token = await OpenListVfs.authenticate('https://list.example.com', 'alice', 'secret',
+          client: client);
+      expect(token, 'tok-123');
+    });
+
+    test('returns empty (no throw) on rejection or bad response', () async {
+      final client = MockClient((_) async => http.Response('{"code":401}', 200));
+      expect(await OpenListVfs.authenticate('https://x', 'u', 'p', client: client), '');
+      expect(await OpenListVfs.authenticate('https://x', '', '', client: client), '');
+    });
+  });
+
+  group('FtpVfs', () {
+    test('builds a playable ftp URL with embedded credentials', () async {
+      final vfs = FtpVfs(baseUrl: 'ftp://host:2121/media', username: 'u', password: 'p@ss');
+      final url = await vfs.resolvePlayableUrl('/Movies/a.mkv');
+      expect(url, startsWith('ftp://'));
+      expect(Uri.parse(url).path, '/media/Movies/a.mkv');
+      expect(Uri.parse(url).userInfo, isNotEmpty);
     });
   });
 }
