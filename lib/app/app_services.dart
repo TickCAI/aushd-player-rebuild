@@ -20,6 +20,7 @@ import '../data/emby_live_tv.dart';
 import '../data/title_ratings.dart';
 import '../data/xtream/live_catalog.dart';
 import '../data/xtream/xtream.dart';
+import '../data/danmaku/danmaku_service.dart';
 import '../playback/emby_playback_api.dart';
 import '../playback/sync/watch_together.dart';
 import '../services/config_remote/config_service.dart';
@@ -39,6 +40,7 @@ final class AppServices extends ChangeNotifier {
     required this.profiles,
     required this.configService,
     required this.mountService,
+    required this.danmaku,
     required this._settings,
   }) {
     var togetherAvailable = together.available;
@@ -75,6 +77,10 @@ final class AppServices extends ChangeNotifier {
 
   /// Locally configured network storage sources (OpenList / WebDAV).
   final MountService mountService;
+
+  /// Danmaku (bullet-comment) overlay sources. Providers arrive via the
+  /// signed config; the enabled flag and chosen source persist locally.
+  final DanmakuService danmaku;
 
   AppSettings _settings;
   AppSettings get settings => _settings;
@@ -159,6 +165,8 @@ final class AppServices extends ChangeNotifier {
       settings = settings.copyWith(onboarded: true);
       await settings.save();
     }
+    final danmaku = DanmakuService(store: store);
+    await danmaku.restorePrefs();
     final services = AppServices._(
       janus: janus,
       catalog: CatalogApi(janus: janus),
@@ -175,11 +183,13 @@ final class AppServices extends ChangeNotifier {
         signingKey: Release.configSigningKey,
       ),
       mountService: MountService(store),
+      danmaku: danmaku,
       settings: settings,
     );
     // Best-effort: load last verified config, then refresh in background.
     // Any failure keeps the built-in home layout — never blocks startup.
     await services.configService.loadCached();
+    services._applyDanmakuSources();
     if (services.configAvailable) unawaited(services.refreshConfig());
     await services.mountService.load();
     services._detectHub();
@@ -212,7 +222,16 @@ final class AppServices extends ChangeNotifier {
   Future<void> refreshConfig() async {
     final before = configService.appliedVersion;
     final cfg = await configService.refresh();
-    if (cfg != null && cfg.version != before) notifyListeners();
+    if (cfg == null || cfg.version == before) return;
+    _applyDanmakuSources();
+    notifyListeners();
+  }
+
+  /// Push the signed config's danmaku sources into the service. Called at
+  /// startup and whenever a new config version lands.
+  void _applyDanmakuSources() {
+    final cfg = configService.config;
+    if (cfg != null) danmaku.applyConfigSources(cfg.danmakuSources);
   }
 
   bool get liveTvAvailable => _settings.xtreamConfigured || playlist.configured;

@@ -83,12 +83,27 @@ class _SettingsPageState extends State<SettingsPage> {
   _Section _section = _Section.playback;
   PlayerSettings? _player;
   DisplayHdrStatus? _display;
+  AppServices? _services;
 
   @override
   void initState() {
     super.initState();
     PlayerSettings.load().then((p) => mounted ? setState(() => _player = p) : null);
     if (Host.isWindows) NativeWindow.hdrStatus().then((d) => mounted ? setState(() => _display = d) : null);
+    // The danmaku toggle lives in its own ChangeNotifier, so flipping it (or
+    // a config update landing new sources) must repaint this page directly.
+    final services = (_services = AppServicesScope.read(context)).danmaku;
+    services.addListener(_onDanmaku);
+  }
+
+  void _onDanmaku() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _services?.danmaku.removeListener(_onDanmaku);
+    super.dispose();
   }
 
   Future<void> _savePlayer(PlayerSettings next) async {
@@ -394,6 +409,21 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           SettingToggleRow(title: l10n.restyleAss, subtitle: l10n.restyleAssHint,
               value: p.overrideAssStyles, onChanged: (v) => _savePlayer(p.copyWith(overrideAssStyles: v))),
+          SettingHeader(l10n.danmaku),
+          SettingToggleRow(
+            title: l10n.danmaku,
+            subtitle: services.danmaku.hasProviders ? l10n.danmakuHint : l10n.danmakuNoSources,
+            value: services.danmaku.enabled,
+            enabled: services.danmaku.hasProviders,
+            onChanged: (v) => services.danmaku.setEnabled(v),
+          ),
+          if (services.danmaku.hasProviders)
+            SettingChoiceRow<String>(
+              title: l10n.danmakuSource,
+              value: services.danmaku.providerId,
+              options: {for (final provider in services.danmaku.providers) provider.id: provider.displayName},
+              onChanged: (v) => services.danmaku.setProvider(v),
+            ),
         ];
       case _Section.languages:
         return [

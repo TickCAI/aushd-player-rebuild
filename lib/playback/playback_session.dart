@@ -8,7 +8,10 @@ import '../core/emby/models/emby_item.dart';
 import '../core/log/app_log.dart';
 import '../core/windows/native_window.dart';
 import '../core/emby/models/media_source.dart';
+import '../data/danmaku/danmaku.dart';
+import '../data/danmaku/danmaku_service.dart';
 import '../l10n/app_localizations.dart';
+import 'danmaku/danmaku_ass.dart';
 import 'emby_playback_api.dart';
 import 'display_guard.dart';
 import 'kept_display.dart';
@@ -66,6 +69,7 @@ final class PlaybackSession {
     required this._api,
     required this._settings,
     required this.l10n,
+    this.danmaku,
     this.acceptInvalidCertificates = false,
     Map<String, String> versionPreferences = const {},
     this.onVersionChosen,
@@ -101,6 +105,11 @@ final class PlaybackSession {
   late final _webhook = PlaybackWebhook(_settings.webhookUrl);
 
   final L10n l10n;
+
+  /// Optional danmaku overlay source. When present and enabled, an ASS track
+  /// is attached as the player's *secondary* subtitle after each load.
+  final DanmakuService? danmaku;
+  int _danmakuGen = 0;
 
   final PlayerBackend _player;
   final _done = Completer<PlaybackEndReason>();
@@ -319,6 +328,7 @@ final class PlaybackSession {
       if (audio != null && !audio.selected) _player.selectTrack('audio', audio.id);
     }
     await _applySubtitle(cur, cur.subtitleIndex, initial: true);
+    unawaited(_refreshDanmaku(cur));
 
     final ps = _player.state.value;
     debugPrint('[session] playing "${cur.item.name}": ${cur.stream.method.wire}, duration ${ps.duration}, '
@@ -451,6 +461,44 @@ final class PlaybackSession {
 
   String _subtitleFormat(MediaStream s) =>
       _player.textSubtitleFormat ?? (s.codecLower == 'ass' || s.codecLower == 'ssa' ? 'ass' : 'srt');
+
+  /// Attach (or detach) the danmaku overlay for [cur].
+  ///
+  /// Runs after every load. Generation-guarded so a slow fetch for an episode
+  /// the user already skipped past can never attach onto the wrong video.
+  Future<void> _refreshDanmaku(_Current cur) async {
+    final service = danmaku;
+    final gen = ++_danmakuGen;
+    if (service == null || !service.enabled) {
+      _player.detachSecondarySubtitle();
+      return;
+    }
+    final item = cur.item;
+    final media = DanmakuMedia(
+      tmdbId: item.tmdbId,
+      title: item.isEpisode ? (item.seriesName ?? item.name) : item.name,
+      season: item.parentIndexNumber,
+      episode: item.indexNumber,
+    );
+    final list = await service.load(media);
+    if (gen != _danmakuGen || _finishing || _current != cur) return;
+    if (list.isEmpty) {
+      _player.detachSecondarySubtitle();
+      return;
+    }
+    try {
+      final path = await DanmakuAss.writeTemp(list, key: media.key);
+      if (gen != _danmakuGen || _finishing || _current != cur) {
+        try {
+          File(path).deleteSync();
+        } catch (_) {}
+        return;
+      }
+      _player.attachSecondarySubtitle(path);
+    } catch (e) {
+      debugPrint('[session] danmaku attach failed: $e');
+    }
+  }
 
   Future<void> _renegotiate({int? audioIndex, int? subtitleIndex}) async {
     final cur = _current;
@@ -964,6 +1012,7 @@ final class PlaybackSession {
     // Any load still in flight is now stale, so its continuations stop before
     // touching the player instead of being swallowed by its _disposed guard.
     _playGen++;
+    _danmakuGen++;
     debugPrint('[session] finishing (${reason.name}) at ${_player.state.value.position}');
     // Anchors the ordered teardown sequence in the log. Anything that writes a
     // player/HDR/refresh line *above* this one came from a path that ran before

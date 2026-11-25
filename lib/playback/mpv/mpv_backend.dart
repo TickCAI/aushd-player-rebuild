@@ -312,6 +312,18 @@ final class MpvBackend implements PlayerBackend {
       _mpv.commandAsync(['sub-add', url.toString(), 'select', title, language ?? '']);
 
   @override
+  void attachSecondarySubtitle(String filePath) {
+    // Add the ASS as a *non-selected* subtitle, then point the secondary slot
+    // at it. The primary subtitle (sid) is untouched, so danmaku overlays
+    // alongside real subs. secondary-sid=auto picks the added track.
+    _mpv.commandAsync(['sub-add', filePath, 'auto', 'danmaku', '']);
+    _mpv.setProperty('secondary-sid', 'auto');
+  }
+
+  @override
+  void detachSecondarySubtitle() => _mpv.setProperty('secondary-sid', 'no');
+
+  @override
   void osd(String command, Object? data) {
     // `_curtain` is disposed at the end of close(); notifying it afterwards
     // throws into the synchronous event stream and used to break the pump.
