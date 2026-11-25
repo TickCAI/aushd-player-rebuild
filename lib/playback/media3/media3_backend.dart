@@ -108,6 +108,14 @@ final class Media3Backend implements PlayerBackend {
   void addSubtitle(Uri url, {required String format, required String title, String? language}) =>
       _call('addSubtitle', {'url': url.toString(), 'format': format, 'title': title, 'language': language});
 
+  // Media3 has no secondary-subtitle slot; danmaku simply does not render on
+  // Android. Kept as no-ops so the shared session code is backend-agnostic.
+  @override
+  void attachSecondarySubtitle(String filePath) {}
+
+  @override
+  void detachSecondarySubtitle() {}
+
   @override
   void osd(String command, Object? data) {
     if (command == 'config' && data is Map) {

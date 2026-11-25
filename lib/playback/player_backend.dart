@@ -101,6 +101,14 @@ abstract interface class PlayerBackend {
 
   void addSubtitle(Uri url, {required String format, required String title, String? language});
 
+  /// Attach an ASS overlay as a *secondary* subtitle track (danmaku), leaving
+  /// the primary subtitle untouched. No-op on backends without a secondary
+  /// track (Media3), so danmaku simply does not render there.
+  void attachSecondarySubtitle(String filePath);
+
+  /// Detach the secondary subtitle track added by [attachSecondarySubtitle].
+  void detachSecondarySubtitle();
+
   void osd(String command, Object? data);
 
   void setPaused(bool paused);

@@ -116,6 +116,7 @@ Future<PlaybackOutcome?> playItem(
       fetchItem: (id) => services.catalog.item(id, localizeMetadata: false),
       settings: settings,
       l10n: l10n,
+      danmaku: services.danmaku,
       acceptInvalidCertificates: acceptBadCerts,
       versionPreferences: services.settings.versionPreferences,
       onVersionChosen: (scope, key) {
