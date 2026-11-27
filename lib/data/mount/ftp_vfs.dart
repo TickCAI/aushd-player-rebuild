@@ -63,8 +63,8 @@ final class FtpVfs implements VirtualFileSystem {
   Uri _playUri(String path) {
     final uri = Uri(scheme: 'ftp', host: endpoint.host, port: endpoint.port, path: _serverPath(path));
     if (username.isEmpty && password.isEmpty) return uri;
-    return uri.replaceUserInfo(
-        '${Uri.encodeComponent(username)}:${Uri.encodeComponent(password)}');
+    return uri.replace(
+        userInfo: '${Uri.encodeComponent(username)}:${Uri.encodeComponent(password)}');
   }
 
   @override

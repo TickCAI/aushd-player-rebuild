@@ -246,7 +246,7 @@ final class DanmakuService extends ChangeNotifier {
   }
 
   void removeUserSource(String id) {
-    if (_userSources.none((s) => s['id'] == id)) return;
+    if (!_userSources.any((s) => s['id'] == id)) return;
     _userSources.removeWhere((s) => s['id'] == id);
     if (_providerId == id) _providerId = '';
     unawaited(_persist());

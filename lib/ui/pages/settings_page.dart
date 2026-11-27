@@ -431,7 +431,7 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: Icons.add_circle_outline_rounded,
             onSelect: () => _addDanmakuSource(services),
           ),
-          if (services.danmaku.providers.any(services.danmaku.isUserSource))
+          if (services.danmaku.providers.any((p) => services.danmaku.isUserSource(p.id)))
             SettingActionRow(
               title: l10n.danmakuManageSources,
               icon: Icons.manage_accounts_outlined,
