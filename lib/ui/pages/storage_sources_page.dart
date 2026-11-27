@@ -13,6 +13,7 @@ import '../widgets/common.dart';
 import '../widgets/media_row.dart';
 import '../widgets/setting_rows.dart';
 import '../widgets/side_panel.dart';
+import '../widgets/storage_form_dialog.dart';
 import 'storage_browser_page.dart';
 
 /// Manage network storage sources (OpenList / WebDAV).
@@ -72,52 +73,38 @@ class _StorageSourcesPageState extends State<StorageSourcesPage> {
     if (mounted) setState(() {});
   }
 
-  /// Sequential text dialogs: name → address → username → password. All
-  /// protocols use the same credential shape (address + username + password);
+  /// One unified form: name, protocol dropdown, host, port, optional path,
+  /// username and password. The port is merged into [baseUrl] by the form.
   /// OpenList exchanges username/password for a bearer token automatically, so
   /// the user never has to find a raw token. Returns null on cancel.
   Future<MountDefinition?> _editFlow(MountDefinition start) async {
-    final l10n = context.l10n;
-    var m = start;
-    final name = await showTextInputDialog(context, title: l10n.storageNameTitle, initial: m.name, hint: l10n.storageNameHint);
-    if (name == null || !mounted) return null;
-    m = MountDefinition(
-      id: m.id, kind: m.kind,
-      name: name.trim().isEmpty ? m.name : name.trim(),
-      baseUrl: m.baseUrl, token: m.token, username: m.username, password: m.password,
+    final result = await showStorageFormDialog(
+      context,
+      kind: start.kind,
+      name: start.name,
+      baseUrl: start.baseUrl,
+      username: start.username,
+      password: start.password,
     );
-    final urlHint = switch (m.kind) {
-      MountKind.openlist => 'https://list.example.com',
-      MountKind.webdav => 'https://host/dav',
-      MountKind.ftp => 'ftp://host:21/folder',
-    };
-    final url = await showTextInputDialog(context, title: l10n.storageUrlTitle, initial: m.baseUrl, hint: urlHint);
-    if (url == null || url.trim().isEmpty || !mounted) return null;
-    m = MountDefinition(
-      id: m.id, kind: m.kind, name: m.name, baseUrl: url.trim(),
-      token: m.token, username: m.username, password: m.password,
-    );
-    final user = await showTextInputDialog(
-      context, title: l10n.storageUserTitle,
-      initial: m.username, hint: l10n.storageUserHint,
-    );
-    if (user == null || !mounted) return null;
-    final pass = await showTextInputDialog(
-      context, title: l10n.storagePasswordTitle, initial: m.password,
-    );
-    if (pass == null || !mounted) return null;
+    if (result == null || !mounted) return null;
+    if (result.baseUrl.isEmpty) return null;
 
     // OpenList: log in once with username/password to obtain a bearer token.
     // On failure (public instance / wrong creds) keep going with an empty
     // token — the user can still browse public content, and _test will tell
     // them something is wrong.
     var token = '';
-    if (m.kind == MountKind.openlist && user.trim().isNotEmpty) {
-      token = await OpenListVfs.authenticate(m.baseUrl, user.trim(), pass);
+    if (start.kind == MountKind.openlist && result.username.isNotEmpty) {
+      token = await OpenListVfs.authenticate(result.baseUrl, result.username, result.password);
     }
     return MountDefinition(
-      id: m.id, kind: m.kind, name: m.name, baseUrl: m.baseUrl,
-      token: token, username: user.trim(), password: pass,
+      id: start.id,
+      kind: start.kind,
+      name: result.name.isEmpty ? start.name : result.name,
+      baseUrl: result.baseUrl,
+      token: token,
+      username: result.username,
+      password: result.password,
     );
   }
 
