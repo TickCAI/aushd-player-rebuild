@@ -6,6 +6,7 @@ import 'package:http/testing.dart';
 import 'package:zerk_play/core/storage/local_store.dart';
 import 'package:zerk_play/data/mount/ftp_vfs.dart';
 import 'package:zerk_play/data/mount/mount_service.dart';
+import 'package:zerk_play/data/mount/mount_url.dart';
 import 'package:zerk_play/data/mount/openlist_vfs.dart';
 import 'package:zerk_play/data/mount/virtual_file_system.dart';
 import 'package:zerk_play/data/mount/webdav_vfs.dart';
@@ -36,6 +37,38 @@ void main() {
     test('encode keeps separators but escapes segments', () {
       expect(VfsPath.encode('/电影/第 1 集.mp4'), '/%E7%94%B5%E5%BD%B1/%E7%AC%AC%201%20%E9%9B%86.mp4');
       expect(VfsPath.encode('/'), '/');
+    });
+  });
+
+  group('mount URL helpers', () {
+    test('buildMountUrl merges protocol, host, port and path', () {
+      expect(buildMountUrl(protocol: 'https', host: 'list.example.com', port: '5246', path: '/dav'),
+          'https://list.example.com:5246/dav');
+      expect(buildMountUrl(protocol: 'http', host: '10.0.0.5', port: '', path: ''),
+          'http://10.0.0.5');
+      expect(buildMountUrl(protocol: 'ftp', host: 'ftp.host.com', port: '21', path: '/media'),
+          'ftp://ftp.host.com:21/media');
+      // Host pasted as a full URL is tolerated.
+      expect(buildMountUrl(protocol: 'https', host: 'https://list.example.com:5246/dav'),
+          'https://list.example.com:5246/dav');
+    });
+
+    test('parseMountUrl splits a baseUrl back into form fields', () {
+      final p = parseMountUrl('https://list.example.com:5246/dav');
+      expect(p.protocol, 'https');
+      expect(p.host, 'list.example.com');
+      expect(p.port, '5246');
+      expect(p.path, '/dav');
+      final plain = parseMountUrl('list.example.com');
+      expect(plain.protocol, 'http');
+      expect(plain.host, 'list.example.com');
+      expect(plain.port, '');
+    });
+
+    test('build/parse round-trip is stable', () {
+      final url = buildMountUrl(protocol: 'ftp', host: 'h', port: '2121', path: '/x');
+      final back = parseMountUrl(url);
+      expect(buildMountUrl(protocol: back.protocol, host: back.host, port: back.port, path: back.path), url);
     });
   });
 
