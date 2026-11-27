@@ -177,14 +177,18 @@ void main() {
     });
 
     test('protocol dropdown lists cloud brands as openlist presets', () {
-      final brands = ProtocolPreset.all.where((p) => p.label != 'OpenList / AList').toList();
+      // Brand entries are the ones carrying a "需先部署 OpenList" hint — they
+      // are all OpenList gateway presets, not direct backends.
+      final brands = ProtocolPreset.all.where((p) => p.hint.isNotEmpty).toList();
       expect(brands, isNotEmpty);
       for (final p in brands) {
         expect(p.kind, MountKind.openlist,
             reason: '${p.label} must bridge through OpenList');
       }
-      expect(ProtocolPreset.all.any((p) => p.kind == MountKind.ftp), isTrue);
-      expect(ProtocolPreset.all.any((p) => p.kind == MountKind.webdav), isTrue);
+      // The three direct backends each appear exactly once.
+      expect(ProtocolPreset.all.where((p) => p.kind == MountKind.ftp), hasLength(1));
+      expect(ProtocolPreset.all.where((p) => p.kind == MountKind.webdav), hasLength(1));
+      expect(ProtocolPreset.all.where((p) => p.kind == MountKind.openlist && p.hint.isEmpty), hasLength(1));
     });
   });
 
