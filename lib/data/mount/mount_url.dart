@@ -28,15 +28,17 @@ String buildMountUrl({
 }) {
   var h = host.trim();
   var p = port.trim();
-  // Tolerate a user pasting a full URL into the host field.
+  var tail = path.trim();
+  // Tolerate a user pasting a full URL into the host field: pull host, port
+  // and path out of it when those fields were left empty.
   final pasted = Uri.tryParse(h);
   if (pasted != null && pasted.scheme.isNotEmpty && pasted.host.isNotEmpty) {
     h = pasted.host;
     if (p.isEmpty && pasted.port > 0) p = pasted.port.toString();
+    if (tail.isEmpty && pasted.path.isNotEmpty && pasted.path != '/') tail = pasted.path;
   }
   h = h.replaceFirst(RegExp(r'^//'), '').replaceFirst(RegExp(r'/+$'), '');
   final authority = p.isEmpty ? h : '$h:$p';
-  final tail = path.trim();
   final cleanPath = tail.isEmpty || tail == '/' ? '' : (tail.startsWith('/') ? tail : '/$tail');
   return '$protocol://$authority$cleanPath';
 }
