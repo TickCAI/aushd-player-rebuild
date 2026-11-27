@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/app_services.dart';
 import '../../data/mount/mount_service.dart';
+import '../../data/mount/openlist_vfs.dart';
 import '../../l10n/l10n.dart';
 import '../core/navigation.dart';
 import '../core/ui_sounds.dart';
@@ -37,19 +38,33 @@ class _StorageSourcesPageState extends State<StorageSourcesPage> {
 
   Future<void> _add() async {
     final l10n = context.l10n;
-    final kind = await showSidePanel<MountKind>(
+    // The dropdown lists concrete protocols/brands. Vendor drives are really
+    // OpenList gateway presets (see ProtocolPreset) — selecting one just
+    // pre-labels an OpenList source.
+    final preset = await showSidePanel<ProtocolPreset>(
       context,
       title: l10n.storagePickKind,
       options: [
-        PanelOption(value: MountKind.openlist, title: 'OpenList', subtitle: l10n.storageKindOpenlistHint, selected: true),
-        PanelOption(value: MountKind.webdav, title: 'WebDAV', subtitle: l10n.storageKindWebdavHint),
+        for (final p in ProtocolPreset.all)
+          PanelOption(
+            value: p,
+            title: p.label,
+            subtitle: p.hint.isEmpty
+                ? (p.kind == MountKind.openlist
+                    ? l10n.storageKindOpenlistHint
+                    : p.kind == MountKind.webdav
+                        ? l10n.storageKindWebdavHint
+                        : l10n.storageKindFtpHint)
+                : p.hint,
+            selected: p == ProtocolPreset.all.first,
+          ),
       ],
     );
-    if (kind == null || !mounted) return;
+    if (preset == null || !mounted) return;
     final mount = await _editFlow(MountDefinition(
       id: 'mount-${DateTime.now().microsecondsSinceEpoch}',
-      kind: kind,
-      name: kind == MountKind.openlist ? 'OpenList' : 'WebDAV',
+      kind: preset.kind,
+      name: preset.label,
       baseUrl: '',
     ));
     if (mount == null || !mounted) return;
@@ -57,61 +72,53 @@ class _StorageSourcesPageState extends State<StorageSourcesPage> {
     if (mounted) setState(() {});
   }
 
-  /// Sequential text dialogs: name → base URL → credentials. Prefilled when
-  /// editing so the user only retypes what changed. Returns null on cancel.
+  /// Sequential text dialogs: name → address → username → password. All
+  /// protocols use the same credential shape (address + username + password);
+  /// OpenList exchanges username/password for a bearer token automatically, so
+  /// the user never has to find a raw token. Returns null on cancel.
   Future<MountDefinition?> _editFlow(MountDefinition start) async {
     final l10n = context.l10n;
     var m = start;
     final name = await showTextInputDialog(context, title: l10n.storageNameTitle, initial: m.name, hint: l10n.storageNameHint);
     if (name == null || !mounted) return null;
     m = MountDefinition(
-      id: m.id,
-      kind: m.kind,
+      id: m.id, kind: m.kind,
       name: name.trim().isEmpty ? m.name : name.trim(),
-      baseUrl: m.baseUrl,
-      token: m.token,
-      username: m.username,
-      password: m.password,
+      baseUrl: m.baseUrl, token: m.token, username: m.username, password: m.password,
     );
-    final url = await showTextInputDialog(
-      context,
-      title: l10n.storageUrlTitle,
-      initial: m.baseUrl,
-      hint: m.kind == MountKind.openlist ? 'https://list.example.com' : 'https://host/dav',
-    );
+    final urlHint = switch (m.kind) {
+      MountKind.openlist => 'https://list.example.com',
+      MountKind.webdav => 'https://host/dav',
+      MountKind.ftp => 'ftp://host:21/folder',
+    };
+    final url = await showTextInputDialog(context, title: l10n.storageUrlTitle, initial: m.baseUrl, hint: urlHint);
     if (url == null || url.trim().isEmpty || !mounted) return null;
     m = MountDefinition(
-      id: m.id,
-      kind: m.kind,
-      name: m.name,
-      baseUrl: url.trim(),
-      token: m.token,
-      username: m.username,
-      password: m.password,
+      id: m.id, kind: m.kind, name: m.name, baseUrl: url.trim(),
+      token: m.token, username: m.username, password: m.password,
     );
-    if (m.kind == MountKind.openlist) {
-      final token = await showTextInputDialog(
-        context,
-        title: l10n.storageTokenTitle,
-        initial: m.token,
-        hint: l10n.storageTokenHint,
-      );
-      if (token == null || !mounted) return null;
-      m = MountDefinition(
-        id: m.id, kind: m.kind, name: m.name, baseUrl: m.baseUrl,
-        token: token.trim(), username: m.username, password: m.password,
-      );
-    } else {
-      final user = await showTextInputDialog(context, title: l10n.username, initial: m.username);
-      if (user == null || !mounted) return null;
-      final pass = await showTextInputDialog(context, title: l10n.password, initial: m.password);
-      if (pass == null || !mounted) return null;
-      m = MountDefinition(
-        id: m.id, kind: m.kind, name: m.name, baseUrl: m.baseUrl,
-        token: '', username: user.trim(), password: pass,
-      );
+    final user = await showTextInputDialog(
+      context, title: l10n.storageUserTitle,
+      initial: m.username, hint: l10n.storageUserHint,
+    );
+    if (user == null || !mounted) return null;
+    final pass = await showTextInputDialog(
+      context, title: l10n.storagePasswordTitle, initial: m.password,
+    );
+    if (pass == null || !mounted) return null;
+
+    // OpenList: log in once with username/password to obtain a bearer token.
+    // On failure (public instance / wrong creds) keep going with an empty
+    // token — the user can still browse public content, and _test will tell
+    // them something is wrong.
+    var token = '';
+    if (m.kind == MountKind.openlist && user.trim().isNotEmpty) {
+      token = await OpenListVfs.authenticate(m.baseUrl, user.trim(), pass);
     }
-    return m;
+    return MountDefinition(
+      id: m.id, kind: m.kind, name: m.name, baseUrl: m.baseUrl,
+      token: token, username: user.trim(), password: pass,
+    );
   }
 
   Future<void> _edit(MountDefinition m) async {
@@ -214,7 +221,11 @@ class _StorageSourcesPageState extends State<StorageSourcesPage> {
         padding: const EdgeInsets.fromLTRB(26, 20, 26, 20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Icon(m.kind == MountKind.openlist ? Icons.cloud_outlined : Icons.cloud_queue_outlined,
+            Icon(switch (m.kind) {
+                  MountKind.openlist => Icons.cloud_outlined,
+                  MountKind.webdav => Icons.cloud_queue_outlined,
+                  MountKind.ftp => Icons.folder_shared_outlined,
+                },
                 size: 34, color: Zc.accent),
             const SizedBox(width: 16),
             Expanded(

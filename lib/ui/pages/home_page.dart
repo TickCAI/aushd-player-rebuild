@@ -44,7 +44,12 @@ enum _Kind {
 
 class _Row {
   _Row(this.title, this.load,
-      {this.style = CardStyle.poster, this.kind = _Kind.cards, this.recommends = true, this.smartSpec, this.id});
+      {this.style = CardStyle.poster,
+      this.kind = _Kind.cards,
+      this.recommends = true,
+      this.smartSpec,
+      this.id,
+      this.discovery = false});
 
   String Function(L10n) title;
 
@@ -60,6 +65,10 @@ class _Row {
 
   /// Stable id used by the signed hot-reload config to reorder home rows.
   final String? id;
+
+  /// Discovery-backed row: TMDB titles not in the library render as 待播
+  /// (watch later) instead of 求片, matching the Discover page.
+  final bool discovery;
 }
 
 class HomePage extends StatefulWidget {
@@ -92,6 +101,14 @@ class _HomePageState extends State<HomePage> {
   static const _parallelRows = 3;
 
   final _resolved = <_Row, MixedItems>{};
+
+  /// Per-row load failures. A cold-start hiccup (a /Views or /Resume that
+  /// times out behind a slow proxy) must not *permanently* hide the Emby-backed
+  /// shelves: an errored future is dropped from `_data` so the next pump
+  /// retries, bounded by [_maxLoadRetries] so a truly broken source can't spin.
+  final _loadFailures = <_Row, int>{};
+  static const _maxLoadRetries = 3;
+
   bool _heroSet = false;
 
   /// Auto-rotating hero candidates. Only entries with a reachable backdrop
@@ -246,6 +263,7 @@ class _HomePageState extends State<HomePage> {
     SmartListResolver.invalidate();
     setState(() {
       _data.clear();
+      _loadFailures.clear();
       _taste = null;
       _tasteTags = null;
       _heroPool.clear();
@@ -317,7 +335,7 @@ class _HomePageState extends State<HomePage> {
         debugPrint('[home] discovery $category: $e');
         return const <Object>[];
       }
-    }, style: style, recommends: false, id: id);
+    }, style: style, recommends: false, id: id, discovery: true);
   }
 
   Future<List<TitleTag>> _tags(AppServices s) => _tasteTags ??= () async {
@@ -520,9 +538,35 @@ class _HomePageState extends State<HomePage> {
         try {
           var items = await row.load();
           if (row.recommends) items = [for (final i in items) if (i.keptInRecommendations) i];
+          _loadFailures.remove(row);
           _resolved[row] = items;
           _collectHero(items, l10n, services);
           return items;
+        } catch (e) {
+          // Drop the errored future so a later pump retries the Emby-backed
+          // shelf (媒体库/观看记录) instead of hiding it for the whole session.
+          // Back off briefly so a proxy recovering from 504 is not hammered.
+          debugPrint('[home] row "${row.id ?? '?'}" load failed: $e');
+          final tries = (_loadFailures[row] ?? 0) + 1;
+          _loadFailures[row] = tries;
+          if (tries < _maxLoadRetries) {
+            Future.delayed(Duration(seconds: 2 * tries), () {
+              if (!mounted) return;
+              // A concurrent refresh clears _loadFailures and _data and starts
+              // a fresh attempt; don't clobber that newer entry.
+              if ((_loadFailures[row] ?? 0) != tries) return;
+              _data.remove(row);
+              // Force the FutureBuilder to rebuild and pick up the fresh
+              // future from _load() below (it still holds the failed one).
+              setState(() {});
+              // _pump() only loads *newly* allowed rows, so re-invoke the load
+              // directly for this already-allowed but failed shelf. Use the
+              // default (counted:false) so _loading is incremented/decremented
+              // in balance by _load itself.
+              if (_allowed.contains(row)) _load(row);
+            });
+          }
+          return const <Object>[];
         } finally {
           _loading--;
           scheduleMicrotask(() => mounted ? _pump() : null);
@@ -855,7 +899,9 @@ class _HomePageState extends State<HomePage> {
         onPlay: () => _play(data),
       );
     }
-    return mixedCard(context, data, style: row.style, rank: rank, autofocus: autofocus, onFocus: () => _focusData(data));
+    return mixedCard(context, data,
+        style: row.style, rank: rank, autofocus: autofocus, discovery: row.discovery,
+        onFocus: () => _focusData(data));
   }
 }
 

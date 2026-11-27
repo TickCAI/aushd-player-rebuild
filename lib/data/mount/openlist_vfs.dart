@@ -34,6 +34,33 @@ final class OpenListVfs implements VirtualFileSystem {
     return u;
   }
 
+  /// Log in with username + password and return the bearer token OpenList
+  /// issues. Used by the settings wizard so the user only types a normal
+  /// account, not a raw token. Returns '' on failure (never throws) — an
+  /// empty token still works for public instances.
+  static Future<String> authenticate(String baseUrl, String username, String password,
+      {http.Client? client}) async {
+    if (username.trim().isEmpty || password.isEmpty) return '';
+    final c = client ?? http.Client();
+    try {
+      final res = await c
+          .post(Uri.parse('${_base(baseUrl)}/api/auth/login'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'username': username.trim(), 'password': password}))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) return '';
+      final decoded = jsonDecode(res.body);
+      if (decoded is! Map<String, dynamic>) return '';
+      if (decoded['code'] is num && decoded['code'] != 200) return '';
+      final data = decoded['data'];
+      if (data is Map && data['token'] is String) return data['token'] as String;
+      if (decoded['token'] is String) return decoded['token'] as String;
+      return '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   @override
   final String id;
 

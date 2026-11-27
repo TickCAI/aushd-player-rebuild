@@ -96,12 +96,22 @@ final class TemplateDanmakuProvider implements DanmakuProvider {
 /// none configured the service is inert and danmaku stays silently off.
 final class DanmakuService extends ChangeNotifier {
   DanmakuService({List<DanmakuProvider>? providers, LocalStore? store})
-      : _providers = [if (providers != null) ...providers],
-        _store = store;
+      : _configProviders = [if (providers != null) ...providers],
+        _store = store {
+    _rebuild();
+  }
 
   static const _prefsKey = 'aushd.danmaku.v1';
 
-  final List<DanmakuProvider> _providers;
+  /// Sources from the signed remote config (阶段1). Replaced on config refresh.
+  final List<DanmakuProvider> _configProviders;
+
+  /// Sources the user added themselves in Settings. Persisted locally so
+  /// danmaku works even when no remote config / signing key is configured.
+  final List<Map<String, String>> _userSources = [];
+
+  /// Effective provider list = config + user sources.
+  final List<DanmakuProvider> _providers = [];
   final LocalStore? _store;
   final Map<String, List<Danmaku>> _cache = {};
   static const _cacheLimit = 40;
@@ -131,13 +141,29 @@ final class DanmakuService extends ChangeNotifier {
       final j = jsonDecode(raw) as Map;
       _enabled = j['enabled'] == true;
       _providerId = '${j['provider'] ?? ''}';
+      final sources = j['sources'];
+      if (sources is List) {
+        _userSources
+          ..clear()
+          ..addAll(sources.whereType<Map>().map((m) => {
+                'id': '${m['id'] ?? ''}',
+                'name': '${m['name'] ?? ''}',
+                'url': '${m['url'] ?? ''}',
+                'requiresTmdb': '${m['requiresTmdb'] ?? 'true'}',
+              }));
+        _rebuild();
+      }
     } catch (_) {}
   }
 
   Future<void> _persist() async {
     final store = _store;
     if (store == null) return;
-    await store.setString(_prefsKey, jsonEncode({'enabled': _enabled, 'provider': _providerId}));
+    await store.setString(_prefsKey, jsonEncode({
+      'enabled': _enabled,
+      'provider': _providerId,
+      'sources': _userSources,
+    }));
   }
 
   void setEnabled(bool value) {
@@ -155,10 +181,8 @@ final class DanmakuService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Replace the provider list from the signed config. Each entry is a map
-  /// `{id, name, url, requiresTmdb?}`; `url` supports `{tmdb}` `{douban}`
-  /// `{title}` `{season}` `{episode}` placeholders. Keeps the current choice
-  /// when its id still exists, otherwise selects the first.
+  /// Replace the config-provided sources (from signed config). User sources
+  /// are preserved. Each entry is `{id, name, url, requiresTmdb?}`.
   void applyConfigSources(List<Map<String, String>> sources, {http.Client? client}) {
     final built = <DanmakuProvider>[];
     for (final s in sources) {
@@ -173,6 +197,26 @@ final class DanmakuService extends ChangeNotifier {
         client: client,
       ));
     }
+    _configProviders
+      ..clear()
+      ..addAll(built);
+    _rebuild();
+  }
+
+  /// Rebuild the effective provider list from config + user sources.
+  void _rebuild() {
+    final built = <DanmakuProvider>[..._configProviders];
+    for (final s in _userSources) {
+      final id = s['id']?.trim();
+      final url = s['url']?.trim();
+      if (id == null || id.isEmpty || url == null || url.isEmpty) continue;
+      built.add(TemplateDanmakuProvider(
+        id: id,
+        displayName: (s['name']?.trim()?.isNotEmpty ?? false) ? s['name']!.trim() : id,
+        urlTemplate: url,
+        requiresTmdb: s['requiresTmdb'] != 'false',
+      ));
+    }
     _providers
       ..clear()
       ..addAll(built);
@@ -183,6 +227,33 @@ final class DanmakuService extends ChangeNotifier {
     if (_providers.isEmpty) _enabled = false;
     notifyListeners();
   }
+
+  /// Add a user-defined source. [name] is the display label, [url] a template
+  /// supporting {tmdb}/{douban}/{title}/{season}/{episode}. Returns its id.
+  String addUserSource({required String name, required String url, bool requiresTmdb = true}) {
+    final id = 'user-${DateTime.now().microsecondsSinceEpoch}';
+    _userSources.add({
+      'id': id,
+      'name': name.trim(),
+      'url': url.trim(),
+      'requiresTmdb': requiresTmdb.toString(),
+    });
+    _providerId = id;
+    _enabled = true;
+    unawaited(_persist());
+    _rebuild();
+    return id;
+  }
+
+  void removeUserSource(String id) {
+    if (!_userSources.any((s) => s['id'] == id)) return;
+    _userSources.removeWhere((s) => s['id'] == id);
+    if (_providerId == id) _providerId = '';
+    unawaited(_persist());
+    _rebuild();
+  }
+
+  bool isUserSource(String id) => _userSources.any((s) => s['id'] == id);
 
   /// Danmaku for [media], using the cache when warm. Returns empty when
   /// disabled, unsupported, or on any failure — danmaku is always optional.

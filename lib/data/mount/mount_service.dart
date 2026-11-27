@@ -3,11 +3,43 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../core/storage/local_store.dart';
+import 'ftp_vfs.dart';
 import 'openlist_vfs.dart';
 import 'virtual_file_system.dart';
 import 'webdav_vfs.dart';
 
-enum MountKind { openlist, webdav }
+/// The storage backends the app can talk to directly.
+///
+/// - [openlist]: OpenList / AList gateway — covers every cloud drive (阿里/百度/
+///   115/夸克/OneDrive/Google Drive) plus SMB and WebDAV behind one HTTP API.
+///   This is the recommended option for network drives.
+/// - [webdav]: standard WebDAV share, direct.
+/// - [ftp]: classic FTP / FTPS share, direct (pure Dart, no native library).
+enum MountKind { openlist, webdav, ftp }
+
+/// A user-facing protocol choice shown in the add-source dropdown. Brand
+/// entries (阿里/百度/...) are really OpenList gateway presets — the app cannot
+/// speak those vendor protocols itself, so [kind] is always [openlist] for them.
+final class ProtocolPreset {
+  const ProtocolPreset(this.label, this.kind, {this.hint = ''});
+
+  final String label;
+  final MountKind kind;
+  final String hint;
+
+  static const List<ProtocolPreset> all = [
+    ProtocolPreset('OpenList / AList', MountKind.openlist),
+    ProtocolPreset('WebDAV', MountKind.webdav),
+    ProtocolPreset('FTP / FTPS', MountKind.ftp),
+    ProtocolPreset('阿里云盘', MountKind.openlist, hint: '需先部署 OpenList'),
+    ProtocolPreset('百度网盘', MountKind.openlist, hint: '需先部署 OpenList'),
+    ProtocolPreset('115 网盘', MountKind.openlist, hint: '需先部署 OpenList'),
+    ProtocolPreset('夸克网盘', MountKind.openlist, hint: '需先部署 OpenList'),
+    ProtocolPreset('OneDrive', MountKind.openlist, hint: '需先部署 OpenList'),
+    ProtocolPreset('Google Drive', MountKind.openlist, hint: '需先部署 OpenList'),
+    ProtocolPreset('SMB / NAS', MountKind.openlist, hint: '需先部署 OpenList'),
+  ];
+}
 
 /// A user-configured storage source. Credentials are persisted locally only
 /// (never uploaded — cloud sync in a later phase will explicitly exclude
@@ -51,7 +83,12 @@ final class MountDefinition {
     return MountDefinition(
       id: id,
       kind: kind,
-      name: raw['name']?.toString() ?? (kind == MountKind.openlist ? 'OpenList' : 'WebDAV'),
+      name: raw['name']?.toString() ??
+          (switch (kind) {
+            MountKind.openlist => 'OpenList',
+            MountKind.webdav => 'WebDAV',
+            MountKind.ftp => 'FTP',
+          }),
       baseUrl: baseUrl,
       token: raw['token']?.toString() ?? '',
       username: raw['username']?.toString() ?? '',
@@ -63,6 +100,8 @@ final class MountDefinition {
         MountKind.openlist => OpenListVfs(
             baseUrl: baseUrl, token: token, password: password, id: id),
         MountKind.webdav => WebDavVfs(
+            baseUrl: baseUrl, username: username, password: password, id: id),
+        MountKind.ftp => FtpVfs(
             baseUrl: baseUrl, username: username, password: password, id: id),
       };
 }

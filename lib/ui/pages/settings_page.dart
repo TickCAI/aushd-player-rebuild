@@ -32,6 +32,7 @@ import '../widgets/exit_app.dart';
 import '../widgets/media_row.dart';
 import '../widgets/remote_setup_panel.dart';
 import '../widgets/setting_rows.dart';
+import '../widgets/side_panel.dart';
 import '../widgets/subtitle_preview.dart';
 import '../widgets/update_dialog.dart';
 import '../widgets/value_slider.dart';
@@ -424,6 +425,18 @@ class _SettingsPageState extends State<SettingsPage> {
               options: {for (final provider in services.danmaku.providers) provider.id: provider.displayName},
               onChanged: (v) => services.danmaku.setProvider(v),
             ),
+          SettingActionRow(
+            title: l10n.danmakuAddSource,
+            subtitle: l10n.danmakuAddSourceHint,
+            icon: Icons.add_circle_outline_rounded,
+            onSelect: () => _addDanmakuSource(services),
+          ),
+          if (services.danmaku.providers.any((p) => services.danmaku.isUserSource(p.id)))
+            SettingActionRow(
+              title: l10n.danmakuManageSources,
+              icon: Icons.manage_accounts_outlined,
+              onSelect: () => _manageDanmakuSources(services),
+            ),
         ];
       case _Section.languages:
         return [
@@ -804,6 +817,39 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _toast(String text) => showToast(context, text);
+
+  /// Prompt for a user-defined danmaku source name + URL template and add it.
+  Future<void> _addDanmakuSource(AppServices services) async {
+    final l10n = context.l10n;
+    final name = await showTextInputDialog(context, title: l10n.danmakuSourceName, hint: l10n.danmakuSourceNameHint);
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    final url = await showTextInputDialog(context, title: l10n.danmakuSourceUrl, hint: l10n.danmakuSourceUrlHint);
+    if (url == null || url.trim().isEmpty || !mounted) return;
+    if (!url.trim().startsWith('http')) {
+      _toast(l10n.danmakuSourceBadUrl);
+      return;
+    }
+    services.danmaku.addUserSource(name: name.trim(), url: url.trim());
+    _toast(l10n.danmakuSourceAdded(name.trim()));
+  }
+
+  /// List the user's own sources and let them remove one.
+  Future<void> _manageDanmakuSources(AppServices services) async {
+    final l10n = context.l10n;
+    final own = services.danmaku.providers.where((p) => services.danmaku.isUserSource(p.id)).toList();
+    if (own.isEmpty) {
+      _toast(l10n.danmakuNoUserSources);
+      return;
+    }
+    final picked = await showSidePanel<String>(
+      context,
+      title: l10n.danmakuManageSources,
+      options: [for (final p in own) PanelOption(value: p.id, title: p.displayName, subtitle: l10n.delete)],
+    );
+    if (picked == null || !mounted) return;
+    services.danmaku.removeUserSource(picked);
+    _toast(l10n.danmakuSourceRemoved);
+  }
 
   void _setXtreamAccount(AppServices services, int i, {String? user, String? password}) {
     final list = [...services.settings.xtreamAccounts];
