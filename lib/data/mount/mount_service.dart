@@ -98,7 +98,7 @@ final class MountDefinition {
 
   VirtualFileSystem toVfs() => switch (kind) {
         MountKind.openlist => OpenListVfs(
-            baseUrl: baseUrl, token: token, password: password, id: id),
+            baseUrl: baseUrl, token: token, username: username, password: password, id: id),
         MountKind.webdav => WebDavVfs(
             baseUrl: baseUrl, username: username, password: password, id: id),
         MountKind.ftp => FtpVfs(
