@@ -8,36 +8,48 @@ import 'virtual_file_system.dart';
 ///
 /// OpenList unifies WebDAV / SMB / every cloud drive behind one HTTP gateway:
 /// - directory listing: `POST /api/fs/list` with `{path, password}`
-/// - direct stream:     `GET  /d/<path>` — fed straight to mpv/media3
+/// - signed play URL:   `POST /api/fs/get` -> `data.raw_url`
 ///
-/// The token is optional: public instances work without one. When present it
-/// is sent as `Authorization: Bearer <token>` on every request; the mpv direct
-/// URL carries it as a `sign`/query-free header is impossible for mpv, so for
-/// protected files we append `?sign=` only if the listing supplied one. In
-/// practice OpenList instances used for media are configured public-read.
+/// Auth notes (verified against a real OpenList server):
+/// - the login endpoint is `POST /api/auth/login` -> `data.token`
+/// - API calls send the token **raw**: `Authorization: <token>` (NOT `Bearer`)
+/// - `/d/<path>` needs `sign`+`expire` and returns "401 expire missing" when
+///   called bare, so playback uses the signed `raw_url` from `/api/fs/get`.
+/// - the REST API lives at the server root; a trailing `/dav` in the configured
+///   URL is the WebDAV endpoint and is stripped before building API paths.
 final class OpenListVfs implements VirtualFileSystem {
   OpenListVfs({
     required String baseUrl,
-    this.token = '',
+    String token = '',
+    this.username = '',
     this.password = '',
     http.Client? client,
     String? id,
   })  : base = _base(baseUrl),
         _client = client ?? http.Client(),
+        _token = token,
         id = id ?? 'openlist:${_base(baseUrl)}';
 
+  /// Strip trailing slashes and a trailing `/dav` (the WebDAV endpoint is not
+  /// the REST API base). Keeps any genuine reverse-proxy subpath intact.
   static String _base(String url) {
     var u = url.trim();
     while (u.endsWith('/')) {
       u = u.substring(0, u.length - 1);
     }
+    if (u.endsWith('/dav')) {
+      u = u.substring(0, u.length - 4);
+      while (u.endsWith('/')) {
+        u = u.substring(0, u.length - 1);
+      }
+    }
     return u;
   }
 
-  /// Log in with username + password and return the bearer token OpenList
-  /// issues. Used by the settings wizard so the user only types a normal
-  /// account, not a raw token. Returns '' on failure (never throws) — an
-  /// empty token still works for public instances.
+  /// Log in with username + password and return the token OpenList issues.
+  /// Used by the settings wizard so the user only types a normal account, not
+  /// a raw token. Returns '' on failure (never throws) — an empty token still
+  /// works for public instances.
   static Future<String> authenticate(String baseUrl, String username, String password,
       {http.Client? client}) async {
     if (username.trim().isEmpty || password.isEmpty) return '';
@@ -48,7 +60,7 @@ final class OpenListVfs implements VirtualFileSystem {
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode({'username': username.trim(), 'password': password}))
           .timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) return '';
+      if (res.statusCode < 200 || res.statusCode >= 300) return '';
       final decoded = jsonDecode(res.body);
       if (decoded is! Map<String, dynamic>) return '';
       if (decoded['code'] is num && decoded['code'] != 200) return '';
@@ -64,33 +76,80 @@ final class OpenListVfs implements VirtualFileSystem {
   @override
   final String id;
 
+  /// REST API base (server root, without a trailing `/dav`).
   final String base;
-  final String token;
+  final String username;
   final String password;
   final http.Client _client;
+
+  /// Mutable so a lazy login can fill it when the wizard could not (e.g. the
+  /// stream page is opened directly from search without a prior catalog scan).
+  String _token;
 
   @override
   String get displayName => 'OpenList';
 
-  Map<String, String> get _headers => token.isEmpty ? const {} : {'Authorization': 'Bearer $token'};
+  /// OpenList expects the raw token, not an OAuth-style `Bearer` prefix.
+  Map<String, String> get _headers => _token.isEmpty ? const {} : {'Authorization': _token};
 
   Uri _api(String endpoint) => Uri.parse('$base$endpoint');
 
-  /// Direct play URL for a file. Path segments are percent-encoded but `/`
-  /// separators are preserved, which is what OpenList's `/d/` route expects.
+  /// Log in lazily if we have credentials but no token yet. Never throws.
+  Future<void> ensureToken() async {
+    if (_token.isNotEmpty || username.trim().isEmpty || password.isEmpty) return;
+    try {
+      _token = await authenticate(base, username, password, client: _client);
+    } catch (_) {
+      _token = '';
+    }
+  }
+
+  /// Fallback direct URL (works only on public instances without signing).
+  /// Kept public for tests and as a last resort when `/api/fs/get` fails.
   Uri directUrl(String path) {
     final encoded = VfsPath.encode(path);
     return Uri.parse('$base/d$encoded');
   }
 
+  /// Resolve a signed, Range-capable play URL via `POST /api/fs/get`.
+  /// Falls back to the bare `/d/` URL for public instances.
   @override
-  Future<String> resolvePlayableUrl(String path) async => directUrl(path).toString();
+  Future<String> resolvePlayableUrl(String path) async {
+    final raw = await getRaw(path);
+    return raw ?? directUrl(path).toString();
+  }
+
+  /// Fetch `data.raw_url` for a file — a signed direct link that needs no auth
+  /// header and supports HTTP Range (what mpv/media3 need).
+  Future<String?> getRaw(String path) async {
+    await ensureToken();
+    final p = VfsPath.normalize(path);
+    try {
+      final res = await _client
+          .post(_api('/api/fs/get'),
+              headers: <String, String>{'Content-Type': 'application/json', ..._headers},
+              body: jsonEncode({'path': p, 'password': ''}))
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      final decoded = jsonDecode(res.body);
+      if (decoded is! Map<String, dynamic>) return null;
+      if (decoded['code'] is num && decoded['code'] != 200) return null;
+      final data = decoded['data'];
+      if (data is Map && data['raw_url'] is String && (data['raw_url'] as String).isNotEmpty) {
+        return data['raw_url'] as String;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Future<bool> check() async {
+    await ensureToken();
     final res = await _client.post(_api('/api/fs/list'),
         headers: <String, String>{'Content-Type': 'application/json', ..._headers},
-        body: jsonEncode({'path': '/', 'password': password, 'page': 1, 'per_page': 1, 'refresh': false}),
+        body: jsonEncode({'path': '/', 'password': '', 'page': 1, 'per_page': 1, 'refresh': false}),
         ).timeout(const Duration(seconds: 15));
     if (res.statusCode != 200) throw StateError('HTTP ${res.statusCode}');
     final j = jsonDecode(res.body) as Map<String, dynamic>;
@@ -101,10 +160,11 @@ final class OpenListVfs implements VirtualFileSystem {
 
   @override
   Future<List<VirtualFile>> list(String path) async {
+    await ensureToken();
     final p = VfsPath.normalize(path);
     final res = await _client.post(_api('/api/fs/list'),
         headers: <String, String>{'Content-Type': 'application/json', ..._headers},
-        body: jsonEncode({'path': p, 'password': password, 'page': 1, 'per_page': 0, 'refresh': false}),
+        body: jsonEncode({'path': p, 'password': '', 'page': 1, 'per_page': 0, 'refresh': false}),
         ).timeout(const Duration(seconds: 20));
     if (res.statusCode != 200) throw StateError('HTTP ${res.statusCode}');
     final decoded = jsonDecode(res.body);

@@ -103,7 +103,8 @@ void main() {
         }),
       );
       final files = await vfs.list('/tv');
-      expect(captured.headers['Authorization'], 'Bearer tk');
+      // OpenList expects the raw token, not an OAuth-style Bearer prefix.
+      expect(captured.headers['Authorization'], 'tk');
       expect(captured.url.toString(), 'https://list.example/api/fs/list');
       expect(jsonDecode(captured.body)['path'], '/tv');
       expect(files.map((f) => f.name).toList(), ['a', 'b.mkv', 'c']); // dir first
@@ -119,6 +120,69 @@ void main() {
         client: MockClient((_) async => http.Response(jsonEncode({'code': 401, 'message': 'token invalid'}), 200)),
       );
       expect(() => vfs.list('/'), throwsA(isA<StateError>()));
+    });
+
+    test('strips a trailing /dav WebDAV endpoint from the REST base', () async {
+      late http.Request captured;
+      final vfs = OpenListVfs(
+        baseUrl: 'http://10.0.0.1:5244/dav',
+        token: 'tk',
+        client: MockClient((req) async {
+          captured = req;
+          return http.Response(jsonEncode({'code': 200, 'data': {'content': []}}), 200);
+        }),
+      );
+      await vfs.list('/');
+      expect(vfs.base, 'http://10.0.0.1:5244');
+      expect(captured.url.toString(), 'http://10.0.0.1:5244/api/fs/list');
+    });
+
+    test('resolvePlayableUrl uses signed raw_url from /api/fs/get', () async {
+      late http.Request captured;
+      final vfs = OpenListVfs(
+        baseUrl: 'https://list.example',
+        token: 'tk',
+        client: MockClient((req) async {
+          captured = req;
+          return http.Response(
+              jsonEncode({'code': 200, 'data': {'raw_url': 'https://cdn.example/signed?sign=abc&expire=1'}}), 200);
+        }),
+      );
+      final url = await vfs.resolvePlayableUrl('/电影/a.mkv');
+      expect(url, 'https://cdn.example/signed?sign=abc&expire=1');
+      expect(captured.url.path, '/api/fs/get');
+      expect(captured.headers['Authorization'], 'tk');
+      expect(jsonDecode(captured.body)['path'], '/电影/a.mkv');
+    });
+
+    test('resolvePlayableUrl falls back to /d/ when no signed url', () async {
+      final vfs = OpenListVfs(
+        baseUrl: 'https://list.example',
+        client: MockClient((_) async => http.Response(jsonEncode({'code': 200, 'data': {}}), 200)),
+      );
+      expect(await vfs.resolvePlayableUrl('/a.mkv'), 'https://list.example/d/a.mkv');
+    });
+
+    test('logs in lazily when credentials present but no token', () async {
+      late http.Request loginReq;
+      late http.Request listReq;
+      final vfs = OpenListVfs(
+        baseUrl: 'https://list.example',
+        username: 'alice',
+        password: 'secret',
+        client: MockClient((req) async {
+          if (req.url.path == '/api/auth/login') {
+            loginReq = req;
+            return http.Response(jsonEncode({'code': 200, 'data': {'token': 'lazy-tok'}}), 200);
+          }
+          listReq = req;
+          return http.Response(jsonEncode({'code': 200, 'data': {'content': []}}), 200);
+        }),
+      );
+      await vfs.list('/');
+      expect(loginReq.url.path, '/api/auth/login');
+      expect(jsonDecode(loginReq.body)['username'], 'alice');
+      expect(listReq.headers['Authorization'], 'lazy-tok');
     });
   });
 
