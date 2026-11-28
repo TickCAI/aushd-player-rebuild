@@ -827,5 +827,19 @@
   "reportFailed": "重新下载失败：{error}",
   "reportConfirm": "删除并重新下载",
   "reportMovieBody": "《{title}》的文件似乎已损坏，将删除其所有版本并重新下载。新文件到位前，该片会暂时从媒体库消失。",
-  "reportSeasonBody": "《{title}》第 {season} 季的文件似乎已损坏，将删除并重新下载。新文件到位前，该季会暂时从媒体库消失。"
+  "reportSeasonBody": "《{title}》第 {season} 季的文件似乎已损坏，将删除并重新下载。新文件到位前，该季会暂时从媒体库消失。",
+  "scrapeLibrary": "补全媒体库",
+  "scrapeLibraryHint": "给缺少封面和简介的影片自动补上。只在本机执行一次，不改动你的媒体库。",
+  "scrapeLibraryRunning": "正在扫描 {done} / {total}…",
+  "scrapeLibraryDone": "已完成——补全 {applied} / {total} 部",
+  "scrapeLibraryCancelled": "已停止，{done} / {total}",
+  "scrapeLibraryNothing": "所有影片都已有封面和简介",
+  "scrapeLibraryStop": "停止扫描",
+  "clearScraperCache": "清除刮削缓存",
+  "clearScraperCacheHint": "忘记之前所有匹配结果。你的媒体库不会被修改。",
+  "scraperCacheCleared": "刮削缓存已清除",
+  "correctMetadata": "更正元数据",
+  "correctMetadataPick": "选择正确的影片",
+  "correctMetadataApplied": "已在本机更新",
+  "nothingFound": "没有找到匹配"
 }

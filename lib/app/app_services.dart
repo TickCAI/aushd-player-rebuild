@@ -12,6 +12,7 @@ import '../data/catalog_api.dart';
 import '../data/metadata_localizer.dart';
 import '../data/mount/mount_service.dart';
 import '../data/recommendations.dart';
+import '../data/scraper/library_scraper.dart';
 import '../data/scraper/smart_scraper.dart';
 import '../data/seerr_api.dart';
 import '../data/title_tags.dart';
@@ -274,6 +275,7 @@ final class AppServices extends ChangeNotifier {
   }
 
   SmartScraper? _scraper;
+  LibraryScraper? _libraryScraper;
 
   /// Visibility-driven local scraper. Rebuilt when the TMDB key/language
   /// changes; null (no-op) when no TMDB key is configured. Results are local
@@ -285,6 +287,19 @@ final class AppServices extends ChangeNotifier {
     final cached = _scraper;
     if (cached != null && cached.tmdb?.apiKey == t.apiKey && cached.language == language) return cached;
     return _scraper = SmartScraper(tmdb: t, language: language);
+  }
+
+  /// Whole-library scan driven by an explicit user action. Rebuilt alongside
+  /// [scraper] so a progress bar never outlives the settings it was started
+  /// with. Null when no TMDB key is configured.
+  LibraryScraper? get libraryScraper {
+    final s = scraper;
+    if (s == null) return _libraryScraper = null;
+    final cached = _libraryScraper;
+    // Rebuild when the underlying scraper was replaced (new key/language), so a
+    // stale progress bar can never describe a scan of the previous settings.
+    if (cached != null && identical(cached.scraper, s)) return cached;
+    return _libraryScraper = LibraryScraper(catalog: catalog, scraper: s);
   }
 
   Future<void> updateSettings(AppSettings next) async {

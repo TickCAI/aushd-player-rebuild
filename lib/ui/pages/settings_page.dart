@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import '../../core/windows/native_window.dart';
 import '../../data/xtream/live_catalog.dart';
 import '../../data/xtream/xtream.dart';
 import '../../data/metadata_localizer.dart';
+import '../../data/scraper/library_scraper.dart';
 import '../../l10n/l10n.dart';
 import '../../playback/language.dart';
 import '../../playback/mpv_conf.dart';
@@ -589,6 +591,18 @@ class _SettingsPageState extends State<SettingsPage> {
               if (mounted) _toast(l10n.metadataCleared);
             },
           ),
+          _LibraryScrapeRow(services: services),
+          SettingActionRow(
+            title: l10n.clearScraperCache,
+            subtitle: l10n.clearScraperCacheHint,
+            icon: Icons.delete_sweep_outlined,
+            onSelect: () async {
+              await services.scraper?.clearCache();
+              await MetadataLocalizer.clearCache();
+              services.markLibraryChanged();
+              if (mounted) _toast(l10n.scraperCacheCleared);
+            },
+          ),
         ];
       case _Section.services:
         return [
@@ -1048,6 +1062,55 @@ class _LogsSentDialog extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// "Complete library" row. The scan progress lives in a [ValueNotifier] on the
+/// scraper, so this row rebuilds on its own instead of forcing the whole
+/// settings page to listen.
+class _LibraryScrapeRow extends StatelessWidget {
+  const _LibraryScrapeRow({required this.services});
+
+  final AppServices services;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final scraper = services.libraryScraper;
+    if (scraper == null) return const SizedBox.shrink();
+
+    return ValueListenableBuilder<LibraryScrapeProgress>(
+      valueListenable: scraper.progress,
+      builder: (context, progress, _) {
+        final String subtitle;
+        if (progress.running) {
+          subtitle = l10n.scrapeLibraryRunning(progress.done, progress.total);
+        } else if (progress.finished && progress.cancelled) {
+          subtitle = l10n.scrapeLibraryCancelled(progress.done, progress.total);
+        } else if (progress.finished && progress.total == 0) {
+          subtitle = l10n.scrapeLibraryNothing;
+        } else if (progress.finished) {
+          subtitle = l10n.scrapeLibraryDone(progress.applied, progress.total);
+        } else {
+          subtitle = l10n.scrapeLibraryHint;
+        }
+        return SettingActionRow(
+          title: progress.running ? l10n.scrapeLibraryStop : l10n.scrapeLibrary,
+          subtitle: subtitle,
+          icon: progress.running ? Icons.stop_circle_outlined : Icons.auto_fix_high_outlined,
+          onSelect: () {
+            if (scraper.running) {
+              scraper.cancel();
+              return;
+            }
+            unawaited(scraper.run().then((_) {
+              if (services.settings.tmdbApiKey.trim().isEmpty) return;
+              services.markLibraryChanged();
+            }));
+          },
+        );
+      },
     );
   }
 }
