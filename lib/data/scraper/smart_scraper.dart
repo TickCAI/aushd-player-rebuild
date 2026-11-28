@@ -266,7 +266,7 @@ final class SmartScraper extends ChangeNotifier {
     return ScrapeResult(item: updated, applied: true, verdict: data['verdict'] ?? 'auto');
   }
 
-  static String _sourcePath(EmbyItem item) {
+  static String? _sourcePath(EmbyItem item) {
     for (final source in item.mediaSources) {
       final p = source.path;
       if (p != null && p.isNotEmpty) return p;

@@ -169,7 +169,7 @@ void main() {
 
   group('clearCache', () {
     test('wipes stored decisions', () async {
-      await ScraperCache.instance.store('name:foo', const {'apply': true, 'posterPath': '/p.jpg'});
+      ScraperCache.instance.store('name:foo', const {'apply': true, 'posterPath': '/p.jpg'});
       expect(ScraperCache.instance.lookup('name:foo'), isNotNull);
       await SmartScraper(tmdb: null).clearCache();
       expect(ScraperCache.instance.lookup('name:foo'), isNull);
