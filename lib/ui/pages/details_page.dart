@@ -4,8 +4,10 @@ import '../../app/app_services.dart';
 import '../../core/emby/models/emby_item.dart';
 import '../../core/emby/models/media_source.dart';
 import '../../data/recommendations.dart';
+import '../../data/scraper/smart_scraper.dart';
 import '../../data/seerr_api.dart';
 import '../../data/title_tags.dart';
+import '../../data/tmdb_api.dart';
 import '../../l10n/l10n.dart';
 import '../../playback/player_settings.dart';
 import '../../playback/trailer/trailers.dart';
@@ -318,6 +320,50 @@ class _DetailsPageState extends State<DetailsPage> {
     }
   }
 
+  /// Lets the user override a wrong (or missing) local match. The scraper never
+  /// applies anything below the auto threshold on its own, so this panel is the
+  /// only way to take a mid-confidence guess. The choice is cached as
+  /// authoritative and applied in memory only.
+  Future<void> _correctMetadata() async {
+    final s = AppServicesScope.read(context);
+    final scraper = s.scraper;
+    final item = _item;
+    if (scraper == null || item == null) return;
+
+    final l10n = context.l10n;
+    final candidates = await scraper.candidates(item);
+    if (!mounted) return;
+    if (candidates.isEmpty) {
+      UiSounds.play(UiSound.error);
+      showToast(context, l10n.nothingFound);
+      return;
+    }
+
+    final choice = await showSidePanel<ScrapeCandidate>(
+      context,
+      title: l10n.correctMetadataPick,
+      header: item.name,
+      options: [
+        for (final c in candidates)
+          PanelOption(
+            value: c,
+            title: c.label,
+            subtitle: '${(c.score * 100).round()}% · ${c.verdict}',
+            image: c.posterPath == null ? null : TmdbApi.imageUrl(c.posterPath!, width: 342),
+          ),
+      ],
+    );
+    if (choice == null || !mounted) return;
+
+    final result = scraper.applyCandidate(item, choice);
+    if (!mounted) return;
+    if (result.applied) {
+      setState(() => _item = result.item);
+      s.markLibraryChanged();
+      showToast(context, l10n.correctMetadataApplied);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final item = _item;
@@ -426,6 +472,13 @@ class _DetailsPageState extends State<DetailsPage> {
                   ),
                 if (canReportProblem(s) && (item.isMovie ? item.tmdbId != null : item.isEpisode && item.parentIndexNumber != null))
                   TvButton(label: l10n.reportProblem, icon: Icons.report_problem_outlined, collapsed: true, onSelect: _reportProblem),
+                if (s.scraper != null && (item.isMovie || item.isSeries))
+                  TvButton(
+                    label: l10n.correctMetadata,
+                    icon: Icons.edit_note_rounded,
+                    collapsed: true,
+                    onSelect: _correctMetadata,
+                  ),
               ]),
             ),
           ),

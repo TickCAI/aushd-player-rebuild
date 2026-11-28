@@ -159,14 +159,19 @@ final class SmartScraper extends ChangeNotifier {
   /// Convenience for row-level prefetch. Errors are swallowed so scrolling is
   /// never interrupted by a network hiccup.
   Future<void> prefetch(Iterable<EmbyItem> items) async {
-    final needed = items.where(_needsScrape).toList();
+    final needed = items.where(needsScrape).toList();
     if (needed.isEmpty) return;
     await Future.wait(
       needed.map((item) => scrape(item).catchError((_) => ScrapeResult(item: item, applied: false, verdict: 'error'))),
     );
   }
 
-  bool _needsScrape(EmbyItem item) =>
+  /// True when this item still lacks artwork the scraper could fill: no
+  /// provider id yet, no server poster, and nothing applied locally.
+  ///
+  /// Public because the whole-library scan filters on exactly the same rule as
+  /// the row prefetch — two definitions would drift apart.
+  bool needsScrape(EmbyItem item) =>
       item.tmdbId == null &&
       (item.primaryImageTag == null || item.primaryImageTag!.isEmpty) &&
       item.localizedPosterPath == null;
@@ -288,6 +293,109 @@ final class SmartScraper extends ChangeNotifier {
     _attempted = 0;
     notifyListeners();
   }
+
+  /// Re-queries TMDB and returns the ranked candidates for [item].
+  ///
+  /// Used by the detail page's "correct metadata" panel: the automatic path
+  /// refuses to apply anything below the auto threshold, so the user needs a way
+  /// to see and pick what the scraper found. Returns an empty list on any
+  /// failure — the caller shows "nothing found" rather than an error.
+  Future<List<ScrapeCandidate>> candidates(EmbyItem item, {int limit = 5}) async {
+    if (tmdb == null) return const [];
+    final filePath = _sourcePath(item);
+    final guess = filePath == null ? null : const FilenameGuesser().guess(_basename(filePath));
+    final queryTitle = (guess?.title.isNotEmpty ?? false) ? guess!.title : item.name.trim();
+    if (queryTitle.isEmpty) return const [];
+    final queryYear = guess?.year ?? item.productionYear;
+    final queryIsTv = guess?.isTv ?? item.isSeries;
+
+    await _gate.acquire();
+    try {
+      final results = await tmdb!.searchMulti(queryTitle, language: language);
+      final scorer = const MatchScorer();
+      final scored = <ScrapeCandidate>[];
+      for (final j in results.take(limit)) {
+        final c = _Candidate.fromTmdb(j);
+        if (c == null) continue;
+        final score = scorer.score(
+          queryTitle: queryTitle,
+          candidateTitle: c.title,
+          candidateOriginal: c.originalTitle,
+          queryYear: queryYear,
+          candidateYear: c.year,
+          queryIsTv: queryIsTv,
+          candidateIsTv: c.isTv,
+        );
+        scored.add(ScrapeCandidate(
+          title: c.title,
+          year: c.year,
+          posterPath: c.posterPath,
+          overview: c.overview,
+          isTv: c.isTv,
+          score: score.score,
+          verdict: scorer.verdict(score).label,
+        ));
+      }
+      scored.sort((a, b) => b.score.compareTo(a.score));
+      return scored;
+    } catch (e) {
+      debugPrint('[scraper] candidates for "$queryTitle" failed: $e');
+      return const [];
+    } finally {
+      _gate.release();
+    }
+  }
+
+  /// Applies a user-chosen candidate and caches the decision as authoritative,
+  /// so later cache hits keep showing it instead of re-scoring.
+  ScrapeResult applyCandidate(EmbyItem item, ScrapeCandidate choice) {
+    final filePath = _sourcePath(item);
+    final key = scraperCacheKey(
+      tmdbId: null,
+      imdbId: item.providerIds['Imdb'] ?? item.providerIds['imdb'],
+      name: choice.title,
+      year: choice.year,
+      path: filePath,
+    );
+    final data = <String, dynamic>{
+      'verdict': 'user',
+      'apply': true,
+      'title': choice.title,
+      if (choice.year != null) 'year': choice.year,
+      'score': choice.score,
+      'reason': 'user-selected',
+      if (choice.posterPath != null) 'posterPath': choice.posterPath,
+      if (choice.overview != null) 'overview': choice.overview,
+    };
+    ScraperCache.instance.store(key, data);
+    final result = _apply(item, data);
+    if (result.applied) _applied++;
+    notifyListeners();
+    return result;
+  }
+}
+
+/// One TMDB candidate offered to the user in the "correct metadata" panel.
+final class ScrapeCandidate {
+  const ScrapeCandidate({
+    required this.title,
+    required this.isTv,
+    required this.score,
+    required this.verdict,
+    this.year,
+    this.posterPath,
+    this.overview,
+  });
+
+  final String title;
+  final int? year;
+  final String? posterPath;
+  final String? overview;
+  final bool isTv;
+  final double score;
+  final String verdict;
+
+  String get label => year == null ? title : '$title ($year)';
 }
 
 final class _Candidate {

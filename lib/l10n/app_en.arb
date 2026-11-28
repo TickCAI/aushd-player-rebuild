@@ -1614,5 +1614,49 @@
         "type": "int"
       }
     }
-  }
+  },
+  "scrapeLibrary": "Complete library",
+  "scrapeLibraryHint": "Fill in missing posters and descriptions for everything without them. Runs once, on this device only.",
+  "scrapeLibraryRunning": "Scanning {done} of {total}…",
+  "@scrapeLibraryRunning": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "scrapeLibraryDone": "Done — {applied} of {total} filled in",
+  "@scrapeLibraryDone": {
+    "placeholders": {
+      "applied": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "scrapeLibraryCancelled": "Stopped at {done} of {total}",
+  "@scrapeLibraryCancelled": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "scrapeLibraryNothing": "Everything already has artwork and text",
+  "scrapeLibraryStop": "Stop scanning",
+  "clearScraperCache": "Clear scraper cache",
+  "clearScraperCacheHint": "Forget every previously matched title. Your media library is never modified.",
+  "scraperCacheCleared": "Scraper cache cleared",
+  "correctMetadata": "Fix metadata",
+  "correctMetadataPick": "Choose the right title",
+  "correctMetadataApplied": "Updated on this device",
+  "nothingFound": "No matches found"
 }
