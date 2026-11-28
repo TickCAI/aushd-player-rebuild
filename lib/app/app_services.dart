@@ -12,6 +12,7 @@ import '../data/catalog_api.dart';
 import '../data/metadata_localizer.dart';
 import '../data/mount/mount_service.dart';
 import '../data/recommendations.dart';
+import '../data/scraper/smart_scraper.dart';
 import '../data/seerr_api.dart';
 import '../data/title_tags.dart';
 import '../data/tmdb_api.dart';
@@ -272,6 +273,20 @@ final class AppServices extends ChangeNotifier {
     return key.isEmpty ? null : TmdbApi(apiKey: key);
   }
 
+  SmartScraper? _scraper;
+
+  /// Visibility-driven local scraper. Rebuilt when the TMDB key/language
+  /// changes; null (no-op) when no TMDB key is configured. Results are local
+  /// overlays only and never written back to the upstream media library.
+  SmartScraper? get scraper {
+    final t = tmdb;
+    if (t == null) return _scraper = null;
+    final language = _settings.tmdbLanguage;
+    final cached = _scraper;
+    if (cached != null && cached.tmdb?.apiKey == t.apiKey && cached.language == language) return cached;
+    return _scraper = SmartScraper(tmdb: t, language: language);
+  }
+
   Future<void> updateSettings(AppSettings next) async {
     final metadataChanged =
         next.tmdbApiKey != _settings.tmdbApiKey || next.metadataLanguage != _settings.metadataLanguage;
@@ -283,7 +298,10 @@ final class AppServices extends ChangeNotifier {
     UiSounds.enabled = next.sounds;
     RecommendationFilter.hideAnimation = next.hideAnimation;
     _rebuildSeerr();
-    if (metadataChanged) _rebuildMetadata();
+    if (metadataChanged) {
+      _rebuildMetadata();
+      _scraper = null; // rebuilt lazily with the new TMDB key/language
+    }
     if (xtreamChanged) _warmLiveTv();
     await next.save();
     notifyListeners();

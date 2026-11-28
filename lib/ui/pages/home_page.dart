@@ -541,6 +541,9 @@ class _HomePageState extends State<HomePage> {
           _loadFailures.remove(row);
           _resolved[row] = items;
           _collectHero(items, l10n, services);
+          // Visibility-driven scrape: enrich shelves whose upstream metadata is
+          // missing, off the critical path. Results are local overlays only.
+          _scrapeRow(row, services, items);
           return items;
         } catch (e) {
           // Drop the errored future so a later pump retries the Emby-backed
@@ -572,6 +575,41 @@ class _HomePageState extends State<HomePage> {
           scheduleMicrotask(() => mounted ? _pump() : null);
         }
       });
+
+  /// Locally enrich only the items currently resolved for this row. Runs in the
+  /// background; a confident match swaps the exact item in [_resolved] and
+  /// refreshes the FutureBuilder via a completed future. Low-confidence or
+  /// errored scrapes leave the row untouched (no wrong posters).
+  void _scrapeRow(_Row row, AppServices services, MixedItems items) {
+    final scraper = services.scraper;
+    if (scraper == null) return;
+    final targets = <EmbyItem>[
+      for (final data in items)
+        if (data is EmbyItem &&
+            data.tmdbId == null &&
+            (data.primaryImageTag == null || data.primaryImageTag!.isEmpty) &&
+            data.localizedPosterPath == null)
+          data,
+    ];
+    if (targets.isEmpty) return;
+    unawaited(() async {
+      await scraper.ready;
+      for (final item in targets) {
+        if (!mounted) return;
+        final result = await scraper.scrape(item);
+        if (!result.applied || !mounted) continue;
+        final current = _resolved[row];
+        if (current == null) continue;
+        final idx = current.indexOf(item);
+        if (idx < 0) continue;
+        final updated = <Object>[...current];
+        updated[idx] = result.item;
+        _resolved[row] = updated;
+        _data[row] = Future.value(updated);
+        if (mounted) setState(() {});
+      }
+    }());
+  }
 
   static HeroInfo? _infoFor(Object data, L10n l10n, AppServices services) {
     if (data is EmbyItem) return HeroInfo.fromItem(l10n, services, data);
